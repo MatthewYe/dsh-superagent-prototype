@@ -378,6 +378,7 @@ Some generic modules still refer directly to GitHub, Feishu or Slack:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/sources/slack.ts` | The Slack kind and plugin entry, exported as `./slack-watch`: the config schema, fields and health entries, scope rows, the Policy and its roster sync, label refresh, the Channel and its reply limit |
+| `src/sources/slack-auth.ts` | The `auth.test` checks shared by the socket loop and the history pass: workspace identity, the `slackTokenRevoked` and `slackConnected` health outcomes, and the precedence of a `tokens_revoked` event over a successful poll |
 | `src/sources/slack-trigger.ts` | Slack event validation and Trigger translation: deterministic ids, thread ids, Channels, mrkdwn to text, scope and admission, and dropped self-echo and edits |
 | `src/sources/slack-channel.ts` | The Slack Channel: one threaded `chat.postMessage` through the bridge, Slack error codes mapped to gone, permanent, retryable and health outcomes, and archive links |
 | `src/sources/slack-read.ts` | The `slack/` reads of a Trigger's message, its root, parent and thread, the messages around it, and `slackThreadContext`, which gives them to assessments through error-checked bridge calls |

@@ -22,6 +22,8 @@ export interface SourceContextDeps {
   readonly problems: ReadonlyMap<string, SetupProblem>
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
+  /** Saves one Source's policy part through the settings layer. */
+  savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
 }
 
 /**
@@ -41,6 +43,8 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined
     },
+    policyPart: <C>(kind: string) => deps.sources.policyPart(kind) as C | undefined,
+    savePolicyPart: (kind, part) => deps.savePolicyPart(kind, part),
     receive: trigger => deps.receive(trigger),
     atomic: work => store.atomic(work),
     state: {
@@ -66,5 +70,6 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)
       health.get(entry)?.set(value)
     },
+    healthOf: entry => kind.health.includes(entry) ? health.get(entry)?.get() : undefined,
   }
 }

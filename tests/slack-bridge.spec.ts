@@ -25,6 +25,8 @@ function harness(options: HarnessOptions = {}) {
   const stderr: string[] = []
   const sleeps: number[] = []
   const tokens: string[] = []
+  const opened: string[] = []
+  const closed: string[] = []
   let signal: (() => void) | undefined
   const io: BridgeIo = {
     out: line => stdout.push(line),
@@ -39,6 +41,10 @@ function harness(options: HarnessOptions = {}) {
       return options.webApi?.(token) ?? { call: async () => ({ ok: true }) }
     },
     createSocket: () => options.socket ?? quietSocket(),
+    openSocketUrl: url => {
+      opened.push(url)
+      return { close: () => { closed.push(url) } }
+    },
     sleep: async ms => { sleeps.push(ms); await options.sleep?.(ms) },
     now: () => new Date('2026-11-12T08:00:00.000Z'),
     onSignal: handler => {
@@ -47,7 +53,7 @@ function harness(options: HarnessOptions = {}) {
     },
   }
   return {
-    io, deps, stdout, stderr, sleeps, tokens,
+    io, deps, stdout, stderr, sleeps, tokens, opened, closed,
     signal: () => signal?.(),
     listening: () => signal !== undefined,
   }
@@ -231,6 +237,8 @@ describe('auth', () => {
       { token: 'xoxb-secret', method: 'auth.test' },
       { token: 'xapp-secret', method: 'apps.connections.open' },
     ])
+    expect(h.opened).toEqual(['wss://wss-primary.slack.com/link/?ticket=abc'])
+    expect(h.closed).toEqual(h.opened)
     const file = join(home, '.slack-dsh-superagent', 'config.json')
     const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
     expect(stored).toMatchObject({ version: 1, bot_token: 'xoxb-secret', app_token: 'xapp-secret', team: 'Acme', team_id: 'T1', bot_id: 'B1', user_id: 'U1', url: 'https://acme.slack.com/', created_at: '2026-11-12T08:00:00.000Z' })

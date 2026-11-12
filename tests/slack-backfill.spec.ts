@@ -56,7 +56,7 @@ function historyHost({ plan, chats = [{ conversationId: 'C0PUBLIC1', listen: 'al
   const commands = new Commands(() => deployment, {}, new AbortController().signal)
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   const parts: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment,
-    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive }
+    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive, savePolicyPart: async () => {} }
   const context = sourceContextOf(parts, { kind: 'slack', health: ['slack', 'history:slack'] })
   const calls = (method: string) => bridge.calls().filter(call => call.method === method)
   const history = () => calls('conversations.history')

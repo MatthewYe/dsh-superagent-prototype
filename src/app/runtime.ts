@@ -161,7 +161,8 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get problems() { return setup.problems }, receive: trigger => passes.receive(trigger) }
+        get problems() { return setup.problems }, receive: trigger => passes.receive(trigger),
+        savePolicyPart: (id, part) => runtime.settings.savePolicyPart(id, part) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),

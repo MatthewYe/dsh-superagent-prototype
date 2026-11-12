@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { Trigger } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { health, type SourceContext } from './host.ts'
+import { checkSlackToken } from './slack-auth.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
 import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
 import type { SlackConfig } from './slack.ts'
@@ -163,6 +164,8 @@ export async function slackHistoryPass(ctx: SourceContext, signal: AbortSignal):
   const config = ctx.config<SlackConfig>(SOURCE)
   const profile = slackProfile(ctx.deployment)
   if (!config || !profile) return
+  // A revoked token would fail every call in the round; report it once instead of as a page of history errors.
+  if (!(await checkSlackToken(ctx, profile))) return
   const started = new Date().toISOString()
   const configured = new Map(config.chats.map(chat => [chat.conversationId, chat.listen]))
   const targets = new Map<string, { direct: boolean; listed: boolean }>()

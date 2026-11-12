@@ -46,7 +46,7 @@ function policyHost(plan: SlackPlan) {
   const engine = new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(store.settings(), sources), assessor, executor, outbox })
   const commands = new Commands(() => deployment, {}, new AbortController().signal)
   const parts: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment,
-    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive: async () => 'stored' as const }
+    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive: async () => 'stored' as const, savePolicyPart: async () => {} }
   const host: SourceHost = { sources, context: kind => sourceContextOf(parts, kind) }
   return { host, store, bridge, calls: (method: string) => bridge.calls().filter(call => call.method === method) }
 }

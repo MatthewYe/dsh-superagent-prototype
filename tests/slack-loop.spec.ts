@@ -14,6 +14,8 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { slackKind } from '../src/sources/slack.ts'
 import { runSlack } from '../src/sources/slack-loop.ts'
+import { reportSlackToken } from '../src/sources/slack-auth.ts'
+import type { SlackProfile } from '../src/sources/slack-setup.ts'
 import { slackTriggerId } from '../src/sources/slack-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -27,8 +29,12 @@ if [ "$1" = "listen" ]; then
   cat "$BRIDGE_EVENTS"
   exec sleep 60
 elif [ "$1" = "api" ]; then
-  printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"
-  printf '%s\\n' '{"ok":true}'
+  if [ -n "$3" ]; then printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"; else printf '%s %s\\n' "$2" '{}' >> "$BRIDGE_API"; fi
+  if [ "$2" = "auth.test" ]; then
+    printf '%s\\n' '{"ok":true,"team_id":"T01234567","team":"Acme","user_id":"U01234567","bot_id":"B01234567","url":"https://acme.slack.com/"}'
+  else
+    printf '%s\\n' '{"ok":true}'
+  fi
 else
   exit 2
 fi`
@@ -44,6 +50,39 @@ if [ "$1" = "listen" ]; then
   exec sleep 60
 fi
 exit 2`
+const REVOKED = `#!/bin/sh
+if [ "$1" = "listen" ]; then
+  echo start >> "$BRIDGE_LOG"
+  printf '%s\\n' "[socket] ready" >&2
+  cat "$BRIDGE_EVENTS"
+  exec sleep 60
+elif [ "$1" = "api" ]; then
+  if [ -n "$3" ]; then printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"; else printf '%s %s\\n' "$2" '{}' >> "$BRIDGE_API"; fi
+  if [ "$2" = "auth.test" ]; then printf '%s\\n' '{"ok":false,"error":"invalid_auth"}'; else printf '%s\\n' '{"ok":true}'; fi
+else
+  exit 2
+fi`
+const RECONNECT = `#!/bin/sh
+if [ "$1" = "listen" ]; then
+  echo start >> "$BRIDGE_LOG"
+  printf '%s\\n' "[socket] ready" >&2
+  if [ "$(grep -c start "$BRIDGE_LOG")" -eq 1 ]; then sleep 1; exit 1; fi
+  cat "$BRIDGE_EVENTS"
+  exec sleep 60
+elif [ "$1" = "api" ]; then
+  if [ -n "$3" ]; then printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"; else printf '%s %s\\n' "$2" '{}' >> "$BRIDGE_API"; fi
+  if [ "$2" = "auth.test" ]; then
+    if [ "$(grep -c auth.test "$BRIDGE_API")" -le 3 ]; then
+      printf '%s\\n' '{"ok":true,"team_id":"T01234567","team":"Acme","user_id":"U01234567","bot_id":"B01234567","url":"https://acme.slack.com/"}'
+    else
+      printf '%s\\n' '{"ok":false,"error":"invalid_auth"}'
+    fi
+  else printf '%s\\n' '{"ok":true}'; fi
+else
+  exit 2
+fi`
+const PROFILE: SlackProfile = { cli: '', teamId: 'T01234567', team: 'Acme', botId: 'B01234567', userId: BOT, name: 'superagent',
+  url: 'https://acme.slack.com/' }
 let seq = 0
 const mention = (overrides: Record<string, unknown> = {}) => ({ type: 'app_mention', channel: 'C0123ABCD', channel_type: 'channel',
   user: 'U0123ABCD', text: `<@${BOT}> can you look?`, ts: '1712345678.000100', ...overrides })
@@ -55,8 +94,8 @@ const hello = () => ({ type: 'hello' })
 
 type Harness = ReturnType<typeof loopHost>
 function loopHost({ events, chats = [{ conversationId: 'C0123ABCD', listen: 'mentions' as const }], otherChats = 'none' as const,
-  directMessages = true, platform }: { events: Record<string, unknown>[]; chats?: { conversationId: string; listen: 'mentions' | 'all' }[];
-  otherChats?: 'none' | 'mentions'; directMessages?: boolean; platform?: string }) {
+  directMessages = true, platform, teamId = '' }: { events: Record<string, unknown>[]; chats?: { conversationId: string; listen: 'mentions' | 'all' }[];
+  otherChats?: 'none' | 'mentions'; directMessages?: boolean; platform?: string; teamId?: string }) {
   const dir = mkdtempSync(join(tmpdir(), 'slack-loop-'))
   const cli = join(dir, 'slack-bridge')
   const eventsPath = join(dir, 'events.ndjson')
@@ -68,7 +107,7 @@ function loopHost({ events, chats = [{ conversationId: 'C0123ABCD', listen: 'men
   writeFileSync(eventsPath, events.map(event => JSON.stringify(event)).join('\n') + '\n')
   const store = new Store(join(dir, 'db.sqlite'))
   store.saveSettings(SettingsSchema.parse({
-    policy: { sources: { slack: { allowed: [{ id: 'U0123ABCD', name: 'Alice' }] } } },
+    policy: { sources: { slack: { teamId, allowed: [{ id: 'U0123ABCD', name: 'Alice' }] } } },
     eval: { mode: 'auto' },
     sources: { slack: { enabled: true, config: { cli, chats, otherChats, directMessages } } },
   }))
@@ -83,11 +122,16 @@ function loopHost({ events, chats = [{ conversationId: 'C0123ABCD', listen: 'men
   const engine = new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(store.settings(), sources), assessor, executor, outbox: port })
   const commands = new Commands(() => deployment, { BRIDGE_EVENTS: eventsPath, BRIDGE_LOG: logPath, BRIDGE_API: apiPath }, new AbortController().signal)
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
+  const savePolicyPart = vi.fn(async (id: string, part: Record<string, unknown>) => {
+    const current = store.settings()
+    store.saveSettings(SettingsSchema.parse({ ...current, policy: { ...current.policy,
+      sources: { ...current.policy.sources, [id]: part } } }))
+  })
   const parts: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment,
-    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive }
+    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive, savePolicyPart }
   const context = sourceContextOf(parts, { kind: 'slack', health: ['slack', 'history:slack'] })
   const lines = (path: string) => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : []
-  return { dir, cli, eventsPath, logPath, apiPath, store, board, sources, engine, commands, context, receive, executor,
+  return { dir, cli, eventsPath, logPath, apiPath, store, board, sources, engine, commands, context, receive, executor, savePolicyPart,
     api: () => lines(apiPath).map(line => { const at = line.indexOf(' '); return { method: line.slice(0, at), body: JSON.parse(line.slice(at + 1)) as Record<string, unknown> } }),
     starts: () => lines(logPath).length }
 }
@@ -110,7 +154,7 @@ describe('Slack socket loop', () => {
     await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
     expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: slackTriggerId('C0123ABCD', '1712345678.000100'), source: 'slack', addressed: 'mention' })
     await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' }))
-    expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' })
+    await vi.waitFor(() => expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' }))
   })
 
   it('starts the bridge again after it exits and reports the failed poll', async () => {
@@ -202,5 +246,55 @@ describe('Slack socket loop', () => {
     await outbox.sent()
     await effects.drain()
     expect(h.api().map(item => item.method)).toEqual(['chat.postMessage'])
+  })
+
+  it('records the workspace on first use and continues', async () => {
+    const h = loopHost({ events: [hello(), envelope(mention())] })
+    await boot(h)
+    await vi.waitFor(() => expect(h.store.settings().policy.sources.slack).toMatchObject({ teamId: 'T01234567' }), { timeout: 10_000 })
+    expect(h.savePolicyPart).toHaveBeenCalledTimes(1)
+    expect(h.savePolicyPart.mock.calls[0]![0]).toBe('slack')
+    await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
+  })
+
+  it('keeps the stored workspace when auth.test agrees', async () => {
+    const h = loopHost({ events: [hello(), envelope(mention())], teamId: 'T01234567' })
+    await boot(h)
+    await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
+    expect(h.savePolicyPart).not.toHaveBeenCalled()
+  })
+
+  it('refuses Triggers when auth.test reports another workspace', async () => {
+    const h = loopHost({ events: [hello(), envelope(mention())], teamId: 'T99999999' })
+    await boot(h)
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTeamChanged' }), { timeout: 10_000 })
+    expect(h.board.all.slack?.detail).toContain('T01234567')
+    expect(h.board.all.slack?.detail).toContain('T99999999')
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(h.starts()).toBe(0)
+    expect(h.receive).not.toHaveBeenCalled()
+    expect(h.savePolicyPart).not.toHaveBeenCalled()
+  })
+
+  it('reports a revoked token at startup and keeps the socket running for recovery', async () => {
+    const h = loopHost({ events: [], platform: REVOKED })
+    await boot(h)
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' }), { timeout: 10_000 })
+    expect(h.starts()).toBe(1)
+  })
+
+  it('reports a revoked token when the socket restarts', async () => {
+    const h = loopHost({ events: [], platform: RECONNECT })
+    await boot(h)
+    await vi.waitFor(() => expect(h.starts()).toBeGreaterThanOrEqual(2), { timeout: 15_000 })
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' }), { timeout: 10_000 })
+  })
+
+  it('clears the revoked-token error once auth.test succeeds', async () => {
+    const h = loopHost({ events: [] })
+    reportSlackToken(h.context, PROFILE, { ok: false, error: 'token_revoked' })
+    expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' })
+    reportSlackToken(h.context, PROFILE, { ok: true, team_id: 'T01234567' })
+    expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' })
   })
 })

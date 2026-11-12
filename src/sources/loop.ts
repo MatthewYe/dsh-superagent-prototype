@@ -31,6 +31,8 @@ export interface Consumer {
   oversized: string
   /** Called for each stdout line, in order; a rejection is reported on the consumer's health entry. */
   line: (line: string) => void | Promise<void>
+  /** Called once after each readiness line (not for ordinary stderr lines), such as to revalidate credentials per restart. */
+  onReady?: () => void | Promise<void>
   /** Builds the health reported when the consumer exits, with the number of failures since it was last ready. */
   failure?: (failures: number, error: unknown) => Health
   /** How long to wait for readiness; 45 seconds by default. */
@@ -90,6 +92,10 @@ async function consume(ctx: SourceContext, consumer: Consumer, signal: AbortSign
     if (line.startsWith(consumer.ready)) {
       ready = true; clearTimeout(timeout); onReady()
       ctx.report(consumer.kind, { state: 'ready', detail: consumer.listening, at: new Date().toISOString() })
+      // A readiness check runs after the ready report so a rejected credential can supersede it.
+      if (consumer.onReady) void Promise.resolve().then(consumer.onReady).catch(error => {
+        ctx.report(consumer.kind, { state: 'error', detail: String(error), at: new Date().toISOString() })
+      })
     } else if (/WARN|drop|error/.test(line)) ctx.report(consumer.kind, { state: 'error', detail: diagnostic })
   })
   stdout.on('line', (line: string) => {
