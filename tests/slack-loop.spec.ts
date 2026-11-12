@@ -36,9 +36,12 @@ fi`
 const EXITS = `#!/bin/sh
 if [ "$1" = "listen" ]; then
   echo start >> "$BRIDGE_LOG"
-  printf '%s\\n' "[socket] ready" >&2
-  sleep 0.2
-  exit 1
+  if [ "$(grep -c start "$BRIDGE_LOG")" -eq 1 ]; then
+    printf '%s\\n' "[socket] ready" >&2
+    sleep 0.2
+    exit 1
+  fi
+  exec sleep 60
 fi
 exit 2`
 let seq = 0
@@ -110,10 +113,11 @@ describe('Slack socket loop', () => {
     expect(h.board.all['history:slack']).toMatchObject({ state: 'starting', code: 'slackFirstPass' })
   })
 
-  it('starts the bridge again after it exits', async () => {
+  it('starts the bridge again after it exits and reports the failed poll', async () => {
     const h = loopHost({ events: [], platform: EXITS })
     const handle = await start(h); running.add(handle)
     await vi.waitFor(() => expect(h.starts()).toBeGreaterThanOrEqual(2), { timeout: 10_000 })
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'pollFailures' }), { timeout: 10_000 })
   })
 
   it('admits a DM and drops unaddressed messages in unlisted conversations', async () => {

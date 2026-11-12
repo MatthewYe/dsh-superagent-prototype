@@ -83,6 +83,7 @@ export function slackConsumer(config: SlackConfig, profile: SlackProfile, line: 
     kind: SOURCE, name: 'Slack socket', command: config.cli, args: ['listen'], env: {},
     ready: '[socket] ready', listening: `Connected to ${profile.team} as @${profile.name || profile.botId}`,
     oversized: 'The slack-bridge printed a line over 1 MiB',
+    failure: (failures, error) => health('error', 'pollFailures', { count: String(failures), error: String(error) }),
     line,
   }
 }
