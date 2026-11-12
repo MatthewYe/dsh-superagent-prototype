@@ -474,9 +474,11 @@ exit 1`)
       health: { runtime: { state: 'ready' } },
       setup: { problem: { code: 'repositoryUnset', detail: 'The GitHub Source names no repository.' } },
     })
-    expect(await setup.run('start')).toMatchObject({
-      code: 3, stdout: expect.stringContaining('waiting for setup: The GitHub Source names no repository.'),
+    const waiting = await setup.run('start')
+    expect(waiting).toMatchObject({
+      code: 3, stderr: expect.stringContaining('waiting for setup: The GitHub Source names no repository.'),
     })
+    expect(body(waiting)).toMatchObject({ container: 'running', setup: { code: 'repositoryUnset' } })
     expect((await setup.run('status')).code).toBe(3)
 
     const broken = harness()
@@ -484,9 +486,11 @@ exit 1`)
       health: { runtime: { state: 'ready' }, github: { state: 'error', detail: 'bad token' } },
       setup: { problem: null },
     })
-    expect(await broken.run('start')).toMatchObject({
-      code: 2, stdout: expect.stringContaining('github reports an error, which a restart does not fix: bad token'),
+    const part = await broken.run('start')
+    expect(part).toMatchObject({
+      code: 2, stderr: expect.stringContaining('github reports an error, which a restart does not fix: bad token'),
     })
+    expect(body(part)).toMatchObject({ container: 'running', errors: { github: 'bad token' } })
     expect((await broken.run('status')).code).toBe(2)
 
     const runtime = harness()

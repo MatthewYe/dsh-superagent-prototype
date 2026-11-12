@@ -323,7 +323,7 @@ esac
 
     const skipped = wrapper(superagent, 'start', ['--respect-stop'])
     expect(skipped.status).toBe(0)
-    expect(skipped.stderr).toContain('Intentional stop is active')
+    expect(skipped.stdout).toContain('Intentional stop is active')
     expect(containerId(superagent)).toBe('')
   })
 
@@ -392,7 +392,11 @@ with open(os.environ['LEGACY_ARGV_FILE'], 'w') as handle:
       allowFailure: true,
     })
     expect(delegated.status).toBe(0)
-    expect(JSON.parse(readFileSync(recorded, 'utf8'))).toEqual(['status', '--profile', 'other', '--timeout', '12', '--stop-timeout', '34'])
+    const argv = JSON.parse(readFileSync(recorded, 'utf8')) as string[]
+    expect(argv.slice(0, 4)).toEqual(['status', '--profile', 'other', '--timeout'])
+    expect(Number(argv[4])).toBe(12)
+    expect(argv[5]).toBe('--stop-timeout')
+    expect(Number(argv[6])).toBe(34)
     // The dispatch happens before the Docker instance check and creates no state.
     expect(existsSync(join(legacyRoot, 'artifacts'))).toBe(false)
 

@@ -298,23 +298,23 @@ def print_status(profile, running, current, args):
 
 
 def explain(current, code):
-    """Print the operator-facing reasons behind a non-zero exit code."""
+    """Print the operator-facing reasons behind a non-zero exit code to stderr."""
     if code == 0 or current is None:
         return
     if current['setup']:
         detail = current['setup'].get('detail', '') if isinstance(current['setup'], dict) else current['setup']
-        print('dsh-superagent is waiting for setup: ' + str(detail))
+        print('dsh-superagent is waiting for setup: ' + str(detail), file=sys.stderr)
     if current['feishu']:
         detail = current['feishu'].get('detail', '') if isinstance(current['feishu'], dict) else current['feishu']
-        print('dsh-superagent runs without Feishu: ' + str(detail))
+        print('dsh-superagent runs without Feishu: ' + str(detail), file=sys.stderr)
     for name, detail in sorted(current['errors'].items()):
         if name != 'runtime':
-            print(f'{name} reports an error, which a restart does not fix: {detail}')
+            print(f'{name} reports an error, which a restart does not fix: {detail}', file=sys.stderr)
     if code == SETUP_WAITS and not current['setup']:
         unready = ', '.join(f'{name} {value}' for name, value in sorted(current['health'].items())
                             if value != 'ready')
         if unready:
-            print('dsh-superagent is running but not ready: ' + unready)
+            print('dsh-superagent is running but not ready: ' + unready, file=sys.stderr)
 
 
 def status(profile, args):
