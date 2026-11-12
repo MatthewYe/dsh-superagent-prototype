@@ -141,7 +141,7 @@ async function startupCheck(ctx: SourceContext): Promise<{ refuse: boolean; heal
 }
 
 /** Reports the starting or paused health rows and, once a profile exists, supervises the socket. */
-export async function watch(ctx: SourceContext, signal: AbortSignal, startup?: Health): Promise<void> {
+export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (signal.aborted) return
   const config = ctx.config<SlackConfig>(SOURCE)
@@ -153,7 +153,6 @@ export async function watch(ctx: SourceContext, signal: AbortSignal, startup?: H
     return
   }
   ctx.report('slack', { state: 'starting', detail: `Connecting to ${profile!.team}` })
-  if (startup) ctx.report('slack', startup)
   ctx.report('history:slack', rows.history)
   const consumer = slackConsumer(config!, profile!, line => handleFrame(ctx, JSON.parse(line) as unknown, config!, profile!),
     () => checkSlackToken(ctx, profile!).then(() => undefined))
@@ -173,5 +172,5 @@ export const runSlack = async (ctx: SourceContext, signal: AbortSignal): Promise
     return
   }
   if (profile && startup.reply) reportSlackToken(ctx, profile, startup.reply)
-  await Promise.allSettled([watch(ctx, signal, startup.health), runSlackHistory(ctx, signal)])
+  await Promise.allSettled([watch(ctx, signal), runSlackHistory(ctx, signal)])
 }
