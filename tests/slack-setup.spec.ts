@@ -7,8 +7,11 @@ import { promisify } from 'node:util'
 import { afterEach, expect, it } from 'vitest'
 import type { Probe } from '../src/deployment.ts'
 import { resolveSlackProfile } from '../src/sources/slack-setup.ts'
-import { SlackConfigSchema } from '../src/sources/slack.ts'
-import { testMachine } from './fixtures/deployment.ts'
+import { SlackConfigSchema, inject, name, slackHealth, slackKind } from '../src/sources/slack.ts'
+import { feishuKind } from '../src/sources/feishu.ts'
+import { SettingsSchema } from '../src/policy.ts'
+import { resolveSourceProfiles } from '../src/app/setup.ts'
+import { testDeployment, testMachine } from './fixtures/deployment.ts'
 
 const conversation = { conversationId: 'C01234567', name: 'General', listen: 'mentions' as const }
 
@@ -26,7 +29,7 @@ it('refuses configuration keys a Slack Source does not use', () => {
 it('refuses duplicate conversations and conversation ids Slack cannot use', () => {
   expect(() => SlackConfigSchema.parse({ chats: [conversation, conversation] })).toThrow('Duplicate conversation IDs')
   for (const conversationId of ['c01234567', 'general', 'C0123', 'D01234567'])
-    expect(() => SlackConfigSchema.parse({ chats: [{ conversationId, listen: 'all' }] })).toThrow()
+    expect(() => SlackConfigSchema.parse({ chats: [{ conversationId, listen: 'all' }] })).toThrow('Slack conversation ID')
 })
 
 it('bounds the history pages and the days of backfill', () => {
@@ -85,4 +88,73 @@ it('reports a token Slack rejects with Slack\'s error', async () => {
   const cli = answer({ ok: false, error: 'invalid_auth' })
   await expect(resolveSlackProfile(testMachine(), { cli }, execute, '')).rejects.toMatchObject({ code: 'slackAuthFailed',
     values: { error: 'invalid_auth' } })
+})
+
+it('declares the settings fields, setup field, health rows and resolved bot fact', () => {
+  expect(slackKind.setup?.fields).toEqual(['cli'])
+  expect(slackKind.fields.map(field => field.key)).toEqual(['cli', 'chats', 'otherChats', 'directMessages', 'readPageSize', 'backfillDays'])
+  expect(slackKind.health).toEqual(['slack', 'history:slack'])
+  const deployment = testDeployment({ sources: { slack: { cli: '/opt/bin/slack-bridge', teamId: 'T01234567', team: 'Acme',
+    botId: 'B01234567', userId: 'U01234567', name: 'superagent', url: 'https://acme.slack.com/' } } })
+  expect(slackKind.facts?.(deployment)).toEqual({ bot: { zh: '当前机器人 superagent', en: 'Current bot superagent' } })
+})
+
+it('stores the Slack and Feishu profiles in their own deployment slots', async () => {
+  const slackCli = answer(identity)
+  const feishuCli = bridge(`if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"appId":"cli_bot","brand":"feishu","identities":{"bot":{"status":"ready"}}}'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "strict-mode" ]; then echo 'strict-mode: bot'; exit 0; fi
+if [ "$1" = "api" ]; then echo '{"bot":{"open_id":"ou_bot","app_name":"Widgets Bot"}}'; exit 0; fi
+exit 2`)
+  const settings = SettingsSchema.parse({ sources: {
+    slack: { enabled: true, config: { cli: slackCli, chats: [{ conversationId: 'C01234567', listen: 'all' }] } },
+    feishu: { enabled: true, config: { cli: feishuCli } },
+  } })
+  const resolved = await resolveSourceProfiles({ machine: testMachine(), settings, kinds: [slackKind, feishuKind],
+    run: execute, signal: new AbortController().signal })
+  expect(resolved.problems.size).toBe(0)
+  expect(resolved.sources.slack).toEqual({ cli: slackCli, teamId: 'T01234567', team: 'Acme', botId: 'B01234567',
+    userId: 'U01234567', name: 'superagent', url: 'https://acme.slack.com/' })
+  expect(resolved.sources.feishu).toEqual({ cli: feishuCli, appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
+    name: 'Widgets Bot' })
+  expect(resolved.sources).not.toHaveProperty('feishu.cli', slackCli)
+})
+
+it('words the Slack health rows from what the setup resolved', () => {
+  const profile = { cli: '/opt/bin/slack-bridge', teamId: 'T01234567', team: 'Acme', botId: 'B01234567',
+    userId: 'U01234567', name: 'superagent', url: 'https://acme.slack.com/' }
+  expect(slackHealth(undefined, undefined)).toMatchObject({ slack: { state: 'paused', code: 'sourceOff' },
+    history: { state: 'paused', code: 'sourceOff' } })
+  expect(slackHealth(SlackConfigSchema.parse({}), undefined)).toMatchObject({ slack: { state: 'paused',
+    code: 'slackBridgeUnset' }, history: { state: 'paused', code: 'slackBridgeUnset' } })
+  expect(slackHealth(SlackConfigSchema.parse({ cli: '/opt/bin/slack-bridge' }), undefined)).toMatchObject({
+    slack: { state: 'paused', code: 'setupPending' }, history: { state: 'paused', code: 'setupPending' } })
+  expect(slackHealth(SlackConfigSchema.parse({ cli: '/opt/bin/slack-bridge' }), profile)).toMatchObject({
+    slack: { state: 'ready', detail: 'Connected to Acme as @superagent', code: 'slackConnected' },
+    history: { state: 'starting', detail: 'Waiting for the first history pass', code: 'slackFirstPass' } })
+})
+
+it('ships the Slack kind as a plugin entry that waits for the orchestrator', () => {
+  expect(name).toBe('dsh-superagent-slack')
+  expect(inject).toEqual(['orchestrator'])
+})
+
+it('pauses only Slack when its probe fails, leaving the other Sources resolved', async () => {
+  const feishuCli = bridge(`if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"appId":"cli_bot","brand":"feishu","identities":{"bot":{"status":"ready"}}}'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "strict-mode" ]; then echo 'strict-mode: bot'; exit 0; fi
+if [ "$1" = "api" ]; then echo '{"bot":{"open_id":"ou_bot","app_name":"Widgets Bot"}}'; exit 0; fi
+exit 2`)
+  const settings = SettingsSchema.parse({ sources: {
+    slack: { enabled: true, config: { cli: join(tmpdir(), 'no-such-slack-bridge') } },
+    feishu: { enabled: true, config: { cli: feishuCli } },
+  } })
+  const resolved = await resolveSourceProfiles({ machine: testMachine(), settings, kinds: [slackKind, feishuKind],
+    run: execute, signal: new AbortController().signal })
+  expect(resolved.problems.get('slack')).toMatchObject({ place: 'slack', code: 'slackBridgeMissing' })
+  expect(resolved.problems.has('feishu')).toBe(false)
+  expect(resolved.sources.slack).toBeUndefined()
+  expect(resolved.sources.feishu).toMatchObject({ botId: 'ou_bot', name: 'Widgets Bot' })
+  expect(slackHealth(SlackConfigSchema.parse({ cli: '/opt/bin/slack-bridge' }), undefined,
+    resolved.problems.get('slack'))).toMatchObject({ slack: { state: 'paused', detail: expect.stringContaining('no-such-slack-bridge') } })
 })
