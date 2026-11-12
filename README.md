@@ -18,14 +18,13 @@ It is also a way of working with an agent: **take as little human attention as p
 Docker is the primary deployment path. With Docker running:
 
 ```sh
-export SUPERAGENT_IMAGE="$(scripts/docker-build | tail -n 1)"
-docker compose up --detach superagent
-docker compose logs superagent
+scripts/dsh-superagent start    # builds the image on demand
+scripts/dsh-superagent status
 ```
 
-Open the panel URL printed in the log and choose **Superagent** in the sidebar. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials and the current limits. One image serves both instances: `docker compose up --detach livis` (or `scripts/docker-instance start livis`) runs the `livis` profile with its plugin on port 3083. The operator wrapper (#5) and the live relay-identity cutover (#7) remain follow-ups.
+`scripts/dsh-superagent` is the operator entry point. It builds the missing image from the repository commit, the dsh-livis commit and the DSH version, then starts only the selected instance, waits for readiness and prints the panel URL. Use `--profile livis` for the `livis` instance on port 3083. The lower-level Compose and `scripts/docker-instance` commands remain available for inspection and recovery. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials, the four status exit codes and `--legacy`. One image serves both instances. The live relay-identity cutover (#7) remains a follow-up.
 
-To install the product into a DeepSeek Harness profile on the host instead, or to have an agent walk through that installation with you, ask your coding agent:
+To install the product into a DeepSeek Harness profile on the host instead (the legacy path, run with `--legacy`), or to have an agent walk through that installation with you, ask your coding agent:
 
 > Read SETUP.md in this repository and set up dsh-superagent with me.
 

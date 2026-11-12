@@ -1,6 +1,6 @@
 # 006 Deployment
 
-Use this guide to build, run, configure, upgrade and troubleshoot dsh-superagent. Docker is the primary deployment: one image, one container per instance. The host-profile installation is in the [appendix](#appendix-host-profile-installation) for development and the rollback window; `SETUP.md` follows that path.
+Use this guide to build, run, configure, upgrade and troubleshoot dsh-superagent. Docker is the primary deployment: one image, one container per instance. `scripts/dsh-superagent` is the operator entry point: it drives Compose for the `superagent` and `livis` instances, keeps the four status exit codes, and delegates to the preserved host supervisor only when asked with `--legacy`. The host-profile installation is in the [appendix](#appendix-host-profile-installation) for development and the rollback window; `SETUP.md` follows that path.
 
 The chapter builds on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md). The root `GLOSSARY.md` fixes the deployment vocabulary, and `docs/adr/0001-docker-deployment.md` records why the stack is shaped this way.
 
@@ -28,8 +28,8 @@ The Docker path carries the container skeleton from the deployment ticket, the c
 | Model key and DSH credential | implemented by the start path: key from the environment or `op run`, DSH credential copied into the home volume | — |
 | One-time import of host state | implemented after a SQLite WAL checkpoint, with an idempotent marker and an unchanged host copy | — |
 | `livis` service, profile and plugin | implemented: the image binds the Livis source plugin from `LIVIS_DIR`, the `livis` service has its own home/state volumes and the published port `3083`; the wrapper can prepare, start, stop and report it | relay identity at cutover (#7) |
-| `scripts/dsh-superagent` driving Compose | not implemented; the script is still the host tmux path | #5 |
-| Hourly recovery of a Docker instance | not implemented; only the Compose restart policy | #5 |
+| `scripts/dsh-superagent` driving Compose | implemented: `start`, `stop`, `restart`, `status`, `logs` and `build` for both instances; the four readiness exit codes, `--respect-stop`, the panel URL under `.artifacts/instances/<instance>/panel-url`, and an image built on demand | — |
+| Hourly recovery of a Docker instance | implemented: the existing hourly check calls `scripts/dsh-superagent --respect-stop restart`; Compose's `restart: unless-stopped` covers a crashed container | — |
 | Cutover runbook | not written | #7 |
 
 The opt-in tests prove the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, the shim and credential plumbing, one-time import with an unchanged host copy, and teardown. The credential test makes a real model call and checks usage only when the model key resolves; otherwise that assertion is skipped and reported. The live GitHub check runs only after the start path has validated the token; if GitHub later rejects it, the test reports that and the shipped stand-in still proves the shim and the git credential path. The livis test copies the host state, replaces the refresh token with a value the identity service rejects, pauses the copied settings and disables every Source, then asserts the real plugin claims its `livis` health entry, reports a graceful authentication failure, keeps DSH serving, and preserves the imported state and the one-container-per-volume rule.
@@ -73,7 +73,51 @@ Each commit is its first 12 characters. For example, a build at product commit `
 
 The script uses `docker buildx build --load --build-context livis="$LIVIS_DIR"`. The Dockerfile copies the two workspace packages (`dsh-livis-protocol` and `dsh-livis-source`) into `/opt/dsh-livis`, runs `pnpm install --frozen-lockfile` there with the image's pinned pnpm, and installs `dsh-livis-source` into the baked `livis` profile with `dsh plugin --profile livis add link:/opt/dsh-livis/packages/dsh-livis-source`. Only the plugin's runtime files enter the image; the checkout's `node_modules`, tests and scripts do not. The script refuses a missing, non-clean or lockfile-less checkout, because the tag must describe the plugin content. One image serves both services; there is no second build.
 
+### The operator wrapper
+
+`scripts/dsh-superagent` is the supported entry point for both Docker instances. It selects one instance, drives `scripts/docker-instance` for the Compose, credential and import work, and reports readiness in the same four exit codes as the host path:
+
+```sh
+scripts/dsh-superagent start            # the superagent instance
+scripts/dsh-superagent status
+scripts/dsh-superagent logs --tail 200
+scripts/dsh-superagent stop
+
+scripts/dsh-superagent --profile livis start
+scripts/dsh-superagent --profile livis status
+scripts/dsh-superagent --profile livis stop
+```
+
+`--profile` accepts `superagent` (default) and `livis`; `DSH_SUPERAGENT_PROFILE` sets the default. A named profile outside those two is refused, because only those two are managed by Docker; use `--legacy` for a host profile. Only the selected instance is started, stopped, restarted or reported.
+
+`start` builds the image on demand if the tag derived from the repository commit, the dsh-livis commit and the pinned DSH version is not in the local cache; `build` forces that build and prints the tag on stdout. A failed build exits 2 with the previous image tag and every volume untouched. `start` then waits for the management API: setup waiting and a broken non-runtime part return 3 and 2 without being treated as a start failure, and a timeout exits 1 while leaving the container running for inspection. When a running instance switches to a different image tag, the wrapper warns that the database migration is one-way and that rolling back needs the volume backup.
+
+`status` prints one JSON object with `instance`, `project`, `container`, `image`, `url`, `panel`, `manually_stopped`, `health`, `errors`, `setup` and `feishu`; the panel URL is also written on every boot to `.artifacts/instances/<instance>/panel-url` (mode 0600). Exit codes are:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The container runs and every management health entry is ready |
+| 1 | It does not run, does not answer, or a runtime error may be fixed by a restart |
+| 2 | A non-runtime part is broken or required configuration is missing (including an image build failure) |
+| 3 | It runs but waits for setup |
+
+`--respect-stop` makes `start` and `restart` leave an intentionally stopped instance stopped and exit 0. Only `stop` writes the marker under `.artifacts/control/profiles/<instance>/manually-stopped`; `start` clears it, and `restart` never writes it. `logs` passes `--follow` and `--tail N` through to the selected service. A per-instance lock refuses two control operations at once.
+
+`--legacy` replaces the wrapper with the preserved pre-Docker implementation in `scripts/dsh-superagent-legacy`, forwarding the action, profile, timeouts, URL and `--respect-stop`. It covers `start`, `stop`, `restart` and `status` only; `logs` and `build` are refused because the host path has no such actions. It never touches the Compose projects, their volumes or the Docker state, which is what makes it the rollback path during the migration window. The appendix describes that host installation.
+
+#### Hourly check
+
+Create the hourly check in the DeepSeek Harness profile you normally use, not in the instance's profile. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
+
+```text
+Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, run `scripts/dsh-superagent --profile superagent logs --tail 200`, read the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+```
+
+Use `--profile livis` for the second instance. `--respect-stop` preserves an intentional stop: only `stop` writes the marker, `start` clears it, and the check never wakes an instance the operator stopped. The Compose `restart: unless-stopped` policy handles a crashed process; the check handles a container that runs but whose runtime is unhealthy.
+
 ### Run and stop the container
+
+The wrapper above is the supported path. The Compose commands here show what it drives and remain useful for inspection or recovery.
 
 ```sh
 docker compose up --detach superagent
@@ -125,7 +169,15 @@ docker compose up --detach livis
 docker compose logs livis | grep -o 'http://127.0.0.1:3083/?token=[A-Za-z0-9_-]*' | tail -n 1
 ```
 
-Or through the wrapper, which is the supported path because it owns the credentials:
+Or through the operator wrapper, which is the supported path because it owns the readiness contract and drives the credential helper:
+
+```sh
+scripts/dsh-superagent --profile livis start
+scripts/dsh-superagent --profile livis status
+scripts/dsh-superagent --profile livis stop
+```
+
+The lower-level helper `scripts/docker-instance` performs the same Compose, credential and state-import work for one instance:
 
 ```sh
 scripts/docker-instance start livis
@@ -134,7 +186,7 @@ scripts/docker-instance stop livis
 SUPERAGENT_INSTANCE=livis scripts/docker-instance start   # equivalent
 ```
 
-The wrapper selects the `livis` profile, service, volume names, state directory and published port from the instance name. It still resolves and validates the agent GitHub token and requires the host DSH credential store at `~/.dsh/.credentials.yaml`, because the imported livis settings poll the GitHub Source and the instance signs in through the DSH account record. It does not resolve the model key or set `DEEPSEEK_API_KEY` for `livis`: the `deepseek-account` provider reads the copied credential store instead.
+The instance selector picks the `livis` profile, service, volume names, state directory and published port from the instance name. The start path still resolves and validates the agent GitHub token and requires the host DSH credential store at `~/.dsh/.credentials.yaml`, because the imported livis settings poll the GitHub Source and the instance signs in through the DSH account record. It does not resolve the model key or set `DEEPSEEK_API_KEY` for `livis`: the `deepseek-account` provider reads the copied credential store instead.
 
 The service sets `DSH_LIVIS_STATE_DIR=/Users/matthewye/.dsh/state/livis/livis-source`. The plugin's own default is `$HOME/.dsh/state/livis/livis-source`, and `HOME` is `/data/dsh` inside the container; without the override the plugin would create a second, empty state under the home volume and the imported client state and job journal would be ignored.
 
@@ -142,19 +194,19 @@ Only one process may hold the livis client state: the refresh token rotates on e
 
 ### Credentialled start (ticket #3)
 
-Prefer `scripts/docker-instance` for a real instance. It wraps Compose and owns the per-instance credentials:
+Use `scripts/dsh-superagent` for the operator contract; it drives `scripts/docker-instance`, which owns the per-instance credentials:
 
 ```sh
-scripts/docker-instance start
-scripts/docker-instance status
-scripts/docker-instance stop
+scripts/dsh-superagent start
+scripts/dsh-superagent status
+scripts/dsh-superagent stop
 ```
 
-Add `livis` as the second argument to drive the second instance; the rest of this section describes the shared start path.
+Use `--profile livis` for the second instance. `scripts/docker-instance` is also usable directly when the readiness polling is not wanted; the rest of this section describes the shared start path.
 
 `start` resolves the agent's GitHub token with `GH_CONFIG_DIR=~/.config/gh-agent gh auth token` (gh reads the macOS Keychain through its own config) and falls back to the raw Keychain item (service `gh:github.com`, account `matthewye-agent`). The chosen token must pass `gh api user` in a temporary 0700 gh config directory before it is written, so a stale Keychain value fails the start with exit code 2 instead of being materialised. `start` also takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import. A second `stop` with no recorded image and no container for the project succeeds as an "already stopped" no-op, so it works without `SUPERAGENT_IMAGE` exported.
 
-The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the wrapper re-executes itself under `op run --env-file`; a signed-out or locked 1Password fails the start. A missing or rejected GitHub token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
+The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the start path re-executes itself under `op run --env-file`; it does not gate on `op whoami`, because that can report a signed-out account while `op run` still resolves the key. `op run` alone decides, and if it exits non-zero the start exits 2 with an actionable message. Exporting `DEEPSEEK_API_KEY` bypasses 1Password entirely. A missing or rejected GitHub token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
 
 Secrets live only in `.artifacts/instances/<instance>/` (mode 0700), never in this repository, [compose.yaml](../compose.yaml) or the image:
 
@@ -241,7 +293,7 @@ Compose runs `/usr/local/bin/superagent-healthcheck` every 5 seconds, with a 5-s
 
 A fresh, unconfigured volume is therefore unhealthy with `setup.problem.code = repositoryUnset`. That is the expected state, not a failed container. `docker compose ps` shows `starting` or `unhealthy` until the instance is configured and every part is ready. The `livis` instance additionally reports a `livis` health entry: `ready` after the relay connects, `paused` when the plugin is disabled or has no refresh token, and `error` with the failure code when authentication or connection fails. Like every Source entry, a failing `livis` relay makes the healthcheck unhealthy but does not stop DeepSeek Harness.
 
-The Compose file sets `restart: unless-stopped` for the container. There is no hourly check driving a Docker instance yet; `scripts/dsh-superagent` still supervises the tmux path and its four status exit codes do not apply to Compose until follow-up #5.
+The Compose file sets `restart: unless-stopped` for the container. That restarts a crashed process, but it cannot see setup waiting or a broken Source. The operator wrapper is the readiness layer: `scripts/dsh-superagent status` maps the management state to the four exit codes, `start` waits for readiness, and the [hourly check](#hourly-check) runs `scripts/dsh-superagent --respect-stop restart` so a failed runtime is recovered without waking an intentionally stopped instance.
 
 ### Credentials
 
@@ -347,20 +399,22 @@ A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write s
 ## Upgrade
 
 1. Wait until no Executor is in the middle of a turn, or pause processing with `POST executor/pause`.
-2. Back up the `superagent-state` volume. The database migration is one-way: an older image cannot open a database migrated by a newer one.
-3. Build the new image from the new code, then recreate the container with its new tag:
+2. Back up the state volume. The database migration is one-way: an older image cannot open a database migrated by a newer one.
+3. Update the checkout and let the wrapper build the new image. With `SUPERAGENT_IMAGE` unset, the tag follows the new repository and dsh-livis commits; `scripts/dsh-superagent build` forces the build and prints the tag if you want to pin it. A failed build leaves the previous tag and every volume untouched.
+4. Restart the instance:
 
    ```sh
-   scripts/docker-build
-   export SUPERAGENT_IMAGE=dsh-superagent:<new tag>
-   docker compose up --detach superagent   # or: livis
+   scripts/dsh-superagent restart                  # superagent
+   scripts/dsh-superagent --profile livis restart  # livis
    ```
 
-4. Inspect `docker compose ps`, `docker compose logs <service>` and the panel. A healthy container is not the same as a healthy instance; wait until every health entry is `ready`. Upgrade the two services separately if only one instance should move; both use the same `SUPERAGENT_IMAGE` tag, so changing it affects the next recreated service.
+   The wrapper warns when a running instance moves to a different image tag, because the database migration is one-way. Build both services from the one tag; restart only the instance that should move.
+
+5. Inspect `scripts/dsh-superagent status`, the container logs and the panel. A healthy container is not the same as a healthy instance; wait until every health entry is `ready`. Upgrade the two services separately if only one instance should move; both use the same `SUPERAGENT_IMAGE` tag, so changing it affects the next recreated service.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
-The previous image tag stays in the local Docker cache, but rollback also needs the pre-upgrade volume backup because of the one-way migration. Restore the volume, set `SUPERAGENT_IMAGE` back to the previous tag and run `docker compose up --detach <service>`.
+The previous image tag stays in the local Docker cache, but rollback also needs the pre-upgrade volume backup because of the one-way migration. Restore the volume, then start the previous tag again: set `SUPERAGENT_IMAGE` to the previous tag, recreate the container with Compose, or use `scripts/dsh-superagent --legacy` for the host path during the migration window.
 
 The opt-in Docker test covers restarting the same image with the same volumes, not an image upgrade or a migrated database. A cutover runbook is follow-up #7.
 
@@ -422,7 +476,7 @@ These three apply only to the host-profile control script:
 
 ## Appendix: host-profile installation
 
-This is the pre-Docker installation kept for development and the rollback window. It runs the product as a DeepSeek Harness profile on the host, supervised by `scripts/dsh-superagent` in tmux; `SETUP.md` walks this path with an agent. It needs the host's Node.js, pnpm, DeepSeek Harness, git and tmux.
+This is the pre-Docker installation kept for development and the rollback window. It runs the product as a DeepSeek Harness profile on the host in tmux, through `scripts/dsh-superagent --legacy`, which replaces itself with the preserved supervisor `scripts/dsh-superagent-legacy`; `SETUP.md` walks this path with an agent. It needs the host's Node.js, pnpm, DeepSeek Harness, git and tmux. Invoking `scripts/dsh-superagent` without `--legacy` drives the Docker instances and refuses any other profile.
 
 ### What runs
 
@@ -522,11 +576,11 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 ### Start and stop
 
 ```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
+scripts/dsh-superagent --legacy start
+scripts/dsh-superagent --legacy status
 ```
 
-`start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script.
+`start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. The `--legacy` flag on the commands above is what selects this host implementation; without it the wrapper drives the Docker instances.
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
 
@@ -554,20 +608,14 @@ Open the URL printed in the log, then choose **Superagent** in the sidebar.
 
 #### Hourly check
 
-Create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
-
-```text
-Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
-```
-
-`--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
+For the host profile, use the [hourly check](#hourly-check) prompt from the Docker path with `--legacy` added to every `scripts/dsh-superagent` command, and replace the `logs --tail 200` failure step with the newest `.artifacts/dsh-superagent-superagent-*.log`. On this path `--respect-stop` still preserves an intentional stop: only `stop` writes the marker, `start` clears it, and `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
 
 ### Host upgrade
 
 1. Wait until no Executor is in the middle of a turn.
 2. Back up `<stateDir>/orchestrator.sqlite`.
 3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent restart` and inspect its status.
+4. Run `scripts/dsh-superagent --legacy restart` and inspect its status.
 
 A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
 
