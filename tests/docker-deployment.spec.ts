@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +22,9 @@ const ENABLED = process.env.DSH_DOCKER_E2E === '1'
 const PORT = Number(process.env.DSH_DOCKER_E2E_PORT ?? 38082)
 const PROJECT = process.env.DSH_DOCKER_E2E_PROJECT ?? `dsh-e2e-${process.pid}-${Date.now().toString(36)}`
 const TIMEOUT = Number(process.env.DSH_DOCKER_E2E_TIMEOUT ?? 180_000)
+const OPERATOR_HOME = process.env.OPERATOR_HOME ?? homedir()
+const OPERATOR_UID = process.env.OPERATOR_UID ?? String(process.getuid?.() ?? 1000)
+const OPERATOR_GID = process.env.OPERATOR_GID ?? String(process.getgid?.() ?? 1000)
 
 const COMPOSE = ['compose', '-f', join(ROOT, 'compose.yaml'), '--project-directory', ROOT, '-p', PROJECT]
 
@@ -53,7 +57,14 @@ function compose(first: string | RunOptions, ...rest: string[]): string {
   const args = typeof first === 'string' ? [first, ...rest] : rest
   return run('docker', [...COMPOSE, ...args], {
     ...options,
-    env: { ...process.env, SUPERAGENT_IMAGE: image, SUPERAGENT_PUBLISH_PORT: String(PORT) },
+    env: {
+      ...process.env,
+      SUPERAGENT_IMAGE: image,
+      SUPERAGENT_PUBLISH_PORT: String(PORT),
+      OPERATOR_HOME,
+      OPERATOR_UID,
+      OPERATOR_GID,
+    },
   })
 }
 
@@ -135,7 +146,7 @@ describe.skipIf(!ENABLED)('docker deployment', () => {
     check(PORT !== 3082 && PORT !== 3083, `refusing to publish on the live instance port ${PORT}`)
     check(PORT > 0 && PORT < 65_536, `invalid DSH_DOCKER_E2E_PORT ${PORT}`)
     const built = run('bash', [join(ROOT, 'scripts', 'docker-build')], {
-      env: { ...process.env, SUPERAGENT_IMAGE: '' },
+      env: { ...process.env, SUPERAGENT_IMAGE: '', OPERATOR_HOME, OPERATOR_UID, OPERATOR_GID },
       timeout: 30 * 60_000,
     })
     image = built.trim().split('\n').at(-1)!.trim()

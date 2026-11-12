@@ -3,8 +3,9 @@
 #
 # It seeds a writable DSH home from the baked profile template on first start,
 # creates and owns the data directories, starts the loopback relay as the
-# operator identity, and execs DSH as uid 501 / gid 20. DSH itself never binds a
-# wildcard address.
+# operator identity, and execs DSH as that identity (OPERATOR_UID / OPERATOR_GID,
+# defaulting to the neutral build defaults). DSH itself never binds a wildcard
+# address.
 #
 # The profile is selected with DSH_PROFILE (compose sets it per service); it
 # selects the template, the seeded profile and the plugin link set. The port
@@ -13,13 +14,14 @@ set -euo pipefail
 
 readonly PROFILE=${DSH_PROFILE:-superagent}
 readonly HOME_DIR=${DSH_HOME:-/data/dsh}
-readonly STATE_DIR=${SUPERAGENT_STATE_DIR:-/Users/matthewye/.dsh/state/superagent}
+readonly OPERATOR_HOME=${OPERATOR_HOME:-/home/operator}
+readonly STATE_DIR=${SUPERAGENT_STATE_DIR:-${OPERATOR_HOME}/.dsh/state/superagent}
 readonly TEMPLATE=${SUPERAGENT_TEMPLATE:-/opt/superagent-template}
 readonly PRODUCT=${SUPERAGENT_PRODUCT:-/opt/dsh-superagent}
 readonly LIVIS_PRODUCT=${SUPERAGENT_LIVIS_PRODUCT:-/opt/dsh-livis/packages/dsh-livis-source}
 readonly RELAY=${SUPERAGENT_RELAY:-/usr/local/lib/superagent/relay.mjs}
-readonly OPERATOR_UID=501
-readonly OPERATOR_GID=20
+readonly OPERATOR_UID=${OPERATOR_UID:-1000}
+readonly OPERATOR_GID=${OPERATOR_GID:-1000}
 
 case "$PROFILE" in
   superagent|livis) ;;

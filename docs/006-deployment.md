@@ -41,7 +41,7 @@ The opt-in tests prove the implemented column: build, boot, unconfigured readine
 - Docker Engine with Compose v2. The path is exercised on macOS 26.7 arm64 with Docker 29.4 (OrbStack) and Compose v5.1.2; Linux and remote Docker hosts are not tested.
 - git 2.32 or later on the build host. `scripts/docker-build` reads the repository and dsh-livis commits for the image tag.
 - A checkout of this repository.
-- A checkout of [dsh-livis](https://github.com/MatthewYe/dsh-livis) for the Livis source plugin. `scripts/docker-build` defaults to `/Users/matthewye/Documents/WorkSpace/dsh-livis`; set `LIVIS_DIR` for another path. The checkout must be clean and have `pnpm-lock.yaml`, because the image tag names its commit.
+- A checkout of [dsh-livis](https://github.com/MatthewYe/dsh-livis) for the Livis source plugin. `scripts/docker-build` defaults to `$HOME/Documents/WorkSpace/dsh-livis`, while the Compose `livis` build context defaults to `../dsh-livis`; set `LIVIS_DIR` to point at the checkout when it lives elsewhere. The checkout must be clean and have `pnpm-lock.yaml`, because the image tag names its commit.
 - Network access during the build: the product, the pinned DeepSeek Harness CLI and the plugin's workspace dependencies are installed from the registry.
 - A free loopback port, `3082` by default. A host-profile instance on `127.0.0.1:3082` conflicts; stop it or choose another published port.
 - Enough free disk for the image and the build cache.
@@ -67,9 +67,25 @@ Each commit is its first 12 characters. For example, a build at product commit `
 | Input | Default | Effect |
 | --- | --- | --- |
 | repository commit | `git rev-parse --short=12 HEAD` | product code and tag |
-| `LIVIS_DIR` | `/Users/matthewye/Documents/WorkSpace/dsh-livis` | dsh-livis checkout used as the named `livis` BuildKit context; its commit is in the tag |
+| `LIVIS_DIR` | `$HOME/Documents/WorkSpace/dsh-livis` (`../dsh-livis` for Compose) | dsh-livis checkout used as the named `livis` BuildKit context; it must contain `packages/dsh-livis-source/package.json` and its commit is in the tag |
 | `DSH_VERSION` | `0.2.1-rc.3` | DeepSeek Harness CLI installed in the image and tag |
 | `SUPERAGENT_IMAGE` | the generated tag | tag to build and, later, the image Compose runs |
+| `OPERATOR_HOME` | `$HOME` in the scripts; `/home/operator` in the Dockerfile and Compose | container-side home that owns the state path, the gh-agent shim and the baked profile `stateDir` |
+| `OPERATOR_UID` / `OPERATOR_GID` | `id -u` / `id -g` in the scripts; `1000` / `1000` in the Dockerfile and Compose | numeric identity the entrypoint chowns to and runs DSH as |
+
+#### Operator identity
+
+The image is operator-bound. `OPERATOR_HOME` is the container-side home under which the state directory, the `gh-agent` shim and both baked profile `stateDir` values live; `OPERATOR_UID` and `OPERATOR_GID` are the numeric identity the entrypoint uses for file ownership and for the DSH process. The defaults are neutral (`/home/operator`, `1000`, `1000`), so a fresh clone contains no developer-specific path or uid. The scripts default them from the invoking operator: `OPERATOR_HOME=${OPERATOR_HOME:-$HOME}`, `OPERATOR_UID=${OPERATOR_UID:-$(id -u)}` and `OPERATOR_GID=${OPERATOR_GID:-$(id -g)}`, and export them to Compose.
+
+The same values are runtime inputs, not only build inputs: Compose derives the state volume mount targets and `SUPERAGENT_STATE_DIR` / `DSH_LIVIS_STATE_DIR` from `${OPERATOR_HOME}`. When you build or run Compose yourself, pass the same identity to both steps:
+
+```sh
+export OPERATOR_HOME="$HOME" OPERATOR_UID="$(id -u)" OPERATOR_GID="$(id -g)"
+export SUPERAGENT_IMAGE="$(scripts/docker-build | tail -n 1)"
+docker compose up --detach superagent
+```
+
+Two operators with different homes or uids cannot share one image, because the baked state path and shim path are absolute; each operator builds their own. The identity is deliberately not part of the deterministic tag (product commit + dsh-livis commit + DSH version), so two builds with identical source inputs keep the same tag.
 
 The script uses `docker buildx build --load --build-context livis="$LIVIS_DIR"`. The Dockerfile copies the two workspace packages (`dsh-livis-protocol` and `dsh-livis-source`) into `/opt/dsh-livis`, runs `pnpm install --frozen-lockfile` there with the image's pinned pnpm, and installs `dsh-livis-source` into the baked `livis` profile with `dsh plugin --profile livis add link:/opt/dsh-livis/packages/dsh-livis-source`. Only the plugin's runtime files enter the image; the checkout's `node_modules`, tests and scripts do not. The script refuses a missing, non-clean or lockfile-less checkout, because the tag must describe the plugin content. One image serves both services; there is no second build.
 
@@ -157,7 +173,7 @@ The panel is published on `127.0.0.1` only. Do not add a `0.0.0.0` publish or a 
 | panel inside the container | `127.0.0.1:3082` | `127.0.0.1:3083` |
 | relay inside the container | `0.0.0.0:13082` | `0.0.0.0:13083` |
 | published port | `${SUPERAGENT_PUBLISH_PORT:-3082}` | `${LIVIS_PUBLISH_PORT:-3083}` |
-| state volume | `superagent-state` at `/Users/matthewye/.dsh/state/superagent` | `livis-state` at `/Users/matthewye/.dsh/state/livis` |
+| state volume | `superagent-state` at `${OPERATOR_HOME}/.dsh/state/superagent` | `livis-state` at `${OPERATOR_HOME}/.dsh/state/livis` |
 | DSH home volume | `superagent-home` | `livis-home` |
 | model | `deepseek-official` / `deepseek-flash` | `deepseek-account` / `deepseek-flash`, through the DSH credential store |
 | plugin | the product | the product and `dsh-livis-source` |
@@ -188,7 +204,7 @@ SUPERAGENT_INSTANCE=livis scripts/docker-instance start   # equivalent
 
 The instance selector picks the `livis` profile, service, volume names, state directory and published port from the instance name. The start path still resolves and validates the agent GitHub token and requires the host DSH credential store at `~/.dsh/.credentials.yaml`, because the imported livis settings poll the GitHub Source and the instance signs in through the DSH account record. It does not resolve the model key or set `DEEPSEEK_API_KEY` for `livis`: the `deepseek-account` provider reads the copied credential store instead.
 
-The service sets `DSH_LIVIS_STATE_DIR=/Users/matthewye/.dsh/state/livis/livis-source`. The plugin's own default is `$HOME/.dsh/state/livis/livis-source`, and `HOME` is `/data/dsh` inside the container; without the override the plugin would create a second, empty state under the home volume and the imported client state and job journal would be ignored.
+The service sets `DSH_LIVIS_STATE_DIR=${OPERATOR_HOME}/.dsh/state/livis/livis-source`. The plugin's own default is `$HOME/.dsh/state/livis/livis-source`, and `HOME` is `/data/dsh` inside the container; without the override the plugin would create a second, empty state under the home volume and the imported client state and job journal would be ignored.
 
 Only one process may hold the livis client state: the refresh token rotates on every successful refresh, so a second instance signing in with the live token invalidates the first. Until cutover (#7), stop the host livis instance before starting the container with the real credential, and never run both against the same refresh token. The wrapper enforces this for the live directory: `prepare` and `start` refuse with exit code 2 while a process matching `--profile livis` is running and the state directory is `~/.dsh/state/livis`; setting `SUPERAGENT_ALLOW_LIVE_LIVIS=1` overrides the refusal deliberately. The opt-in test never copies the real token into the container: it replaces it with a rejected value, pauses the copied settings and disables every Source, so the plugin reports an authentication failure without polling or executing anything.
 
@@ -204,7 +220,7 @@ scripts/dsh-superagent stop
 
 Use `--profile livis` for the second instance. `scripts/docker-instance` is also usable directly when the readiness polling is not wanted; the rest of this section describes the shared start path.
 
-`start` resolves the agent's GitHub token with `GH_CONFIG_DIR=~/.config/gh-agent gh auth token` (gh reads the macOS Keychain through its own config) and falls back to the raw Keychain item (service `gh:github.com`, account `matthewye-agent`). The chosen token must pass `gh api user` in a temporary 0700 gh config directory before it is written, so a stale Keychain value fails the start with exit code 2 instead of being materialised. `start` also takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import. A second `stop` with no recorded image and no container for the project succeeds as an "already stopped" no-op, so it works without `SUPERAGENT_IMAGE` exported.
+`start` resolves the agent's GitHub token with `GH_CONFIG_DIR=~/.config/gh-agent gh auth token` (gh reads the macOS Keychain through its own config) and falls back to the raw Keychain item (service `gh:github.com`, account named by `SUPERAGENT_GH_KEYCHAIN_ACCOUNT`, or the account in `~/.config/gh-agent/hosts.yml`). The chosen token must pass `gh api user` in a temporary 0700 gh config directory before it is written, so a stale Keychain value fails the start with exit code 2 instead of being materialised. `start` also takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import. A second `stop` with no recorded image and no container for the project succeeds as an "already stopped" no-op, so it works without `SUPERAGENT_IMAGE` exported.
 
 The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the start path re-executes itself under `op run --env-file`; it does not gate on `op whoami`, because that can report a signed-out account while `op run` still resolves the key. `op run` alone decides, and if it exits non-zero the start exits 2 with an actionable message. Exporting `DEEPSEEK_API_KEY` bypasses 1Password entirely. A missing or rejected GitHub token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
 
@@ -212,7 +228,7 @@ Secrets live only in `.artifacts/instances/<instance>/` (mode 0700), never in th
 
 | File | Mode | Purpose |
 | --- | --- | --- |
-| `hosts.yml` | 0600 | the validated token for `gh`, bind-mounted read-only at the container's `/Users/matthewye/.config/gh-agent/hosts.yml`; removed by `stop` |
+| `hosts.yml` | 0600 | the validated token for `gh`, bind-mounted read-only at the container's `${OPERATOR_HOME}/.config/gh-agent/hosts.yml`; removed by `stop` |
 | `credentials.yaml` | 0600 | a copy of the host DSH credential store, bind-mounted read-only at `/run/superagent/credentials.yaml`; the entrypoint copies it into the home volume once |
 | `compose.runtime.yaml` | 0600 | the generated override with those mounts and the model-key environment |
 | `panel-url` | 0600 | the per-boot panel URL printed by `status` |
@@ -226,11 +242,11 @@ The image runs Debian bookworm slim with:
 - the product built from the repository commit, its production dependencies and its `dsh` plugin entry;
 - DeepSeek Harness pinned at `0.2.1-rc.3`, plus pnpm;
 - the `superagent` profile template generated from DeepSeek Harness's Web profile, with the product linked as a plugin, the web server on `127.0.0.1:3082` and the state directory at the absolute path below;
-- the `livis` profile template, likewise generated from the Web profile, with the product and `dsh-livis-source` linked, the web server on `127.0.0.1:3083`, the state directory at `/Users/matthewye/.dsh/state/livis` and `deepseek-account` / `deepseek-flash` as the default model;
+- the `livis` profile template, likewise generated from the Web profile, with the product and `dsh-livis-source` linked, the web server on `127.0.0.1:3083`, the state directory at `${OPERATOR_HOME}/.dsh/state/livis` and `deepseek-account` / `deepseek-flash` as the default model;
 - the Livis source plugin at `/opt/dsh-livis/packages/dsh-livis-source`, built from the dsh-livis commit in the tag;
 - the tools setup and workers need: `git`, `git-lfs`, `gh`, `python3`, `jq`, `curl`, `socat`, `bash` and `tini`.
 
-It contains no credential, no copy of the operator's home directory and no source checkout. The entrypoint uses root only to seed the volumes and fix ownership, then runs the relay and DeepSeek Harness as uid 501, gid 20.
+It contains no credential, no copy of the operator's home directory and no source checkout. The entrypoint uses root only to seed the volumes and fix ownership, then runs the relay and DeepSeek Harness as `OPERATOR_UID`:`OPERATOR_GID` (the wrapper's `id -u` / `id -g` by default).
 
 | Path | Purpose |
 | --- | --- |
@@ -239,8 +255,8 @@ It contains no credential, no copy of the operator's home directory and no sourc
 | `/opt/dsh-superagent` | the product code |
 | `/opt/superagent-template`, `/opt/livis-template` | first-boot profile templates |
 | `/opt/dsh-livis` | the Livis source plugin's workspace packages |
-| `/Users/matthewye/.dsh/state/superagent` | `superagent` state directory, volume `superagent-state` |
-| `/Users/matthewye/.dsh/state/livis` | `livis` state directory, volume `livis-state` |
+| `${OPERATOR_HOME}/.dsh/state/superagent` | `superagent` state directory, volume `superagent-state` |
+| `${OPERATOR_HOME}/.dsh/state/livis` | `livis` state directory, volume `livis-state` |
 | `/usr/local/lib/superagent/relay.mjs` | the relay, parameterised by `SUPERAGENT_RELAY_PORT` and `SUPERAGENT_TARGET_PORT` |
 
 The worker and router presets still run with `danger-full-access`. Inside Docker the container and its volumes are the isolation boundary: a worker can read the instance's DSH home and state, including any credential that a later ticket installs there, and can write any source checkout that is later bind-mounted. It cannot read the rest of the host filesystem.
@@ -252,15 +268,15 @@ The Compose file defines two named volumes per instance:
 | Volume | Mounted at | Holds | Lost when |
 | --- | --- | --- | --- |
 | `superagent-home` | `/data/dsh` | profile, plugin link, DeepSeek Harness settings and the imported DSH credential | `docker compose down --volumes` |
-| `superagent-state` | `/Users/matthewye/.dsh/state/superagent` | orchestrator database, lock, command shims, git configuration, Tickets | `docker compose down --volumes` |
+| `superagent-state` | `${OPERATOR_HOME}/.dsh/state/superagent` | orchestrator database, lock, command shims, git configuration, Tickets | `docker compose down --volumes` |
 | `livis-home` | `/data/dsh` | the livis profile, both plugin links and the imported DSH credential | `docker compose down --volumes` |
-| `livis-state` | `/Users/matthewye/.dsh/state/livis` | orchestrator database, the `livis-source` client state and job journal, command shims, git configuration, Tickets | `docker compose down --volumes` |
+| `livis-state` | `${OPERATOR_HOME}/.dsh/state/livis` | orchestrator database, the `livis-source` client state and job journal, command shims, git configuration, Tickets | `docker compose down --volumes` |
 
 Named volumes keep the host's state directories out of the container's write path. The host copies at `~/.dsh/state/superagent` and `~/.dsh/state/livis` stay as they are, so a rollback does not depend on the container.
 
 `scripts/docker-instance prepare` imports the host state into the selected instance's state volume once: `superagent-state` from `~/.dsh/state/superagent` by default, `livis-state` from `~/.dsh/state/livis` when the instance is `livis`. It checkpoints the host SQLite WAL first, copies the directory into the volume, writes the `.imported` marker with the host hash, and verifies that the host copy did not change. Later starts keep the instance state and never import again. The host copy remains the rollback source. Do not copy the SQLite database into a running instance by hand: two writers would corrupt it, and the host copy would diverge from its hash.
 
-For the livis instance the copied tree also contains `livis-source/client/state.json` and `livis-source/jobs.json`. The entrypoint fixes ownership to uid 501 and preserves the 0600 mode the plugin's state reader requires. To test without touching the live account, copy the directory yourself, replace `refreshToken` with a fake value of the same shape, and save settings with `paused: true` and no Sources before importing; the plugin then reports an authentication failure instead of refreshing the real token. Never copy the live `state.json` into a container while the host livis instance is running: the refresh token rotates and only one process may hold it.
+For the livis instance the copied tree also contains `livis-source/client/state.json` and `livis-source/jobs.json`. The entrypoint fixes ownership to `OPERATOR_UID`:`OPERATOR_GID` and preserves the 0600 mode the plugin's state reader requires. To test without touching the live account, copy the directory yourself, replace `refreshToken` with a fake value of the same shape, and save settings with `paused: true` and no Sources before importing; the plugin then reports an authentication failure instead of refreshing the real token. Never copy the live `state.json` into a container while the host livis instance is running: the refresh token rotates and only one process may hold it.
 
 Back up a volume before an upgrade. The database inside is `<stateDir>/orchestrator.sqlite`; use your Docker volume backup procedure and test the restore before the rollback window closes.
 
@@ -312,7 +328,7 @@ The image provides the same `gh-agent` path the imported `worker-gitconfig` and 
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `/Users/matthewye/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `${OPERATOR_HOME}/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -432,7 +448,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `LIVIS_DIR` is missing, is not a dsh-livis checkout, has no lockfile or is dirty | Point `LIVIS_DIR` at a clean dsh-livis checkout with `pnpm-lock.yaml`; the tag names its commit, so a dirty tree cannot be described |
 | The livis container fails at `/opt/dsh-livis/packages/dsh-livis-source/package.json` | The image was built without the `livis` BuildKit context; rebuild with `scripts/docker-build` |
 | The livis health entry says `LIVIS_AUTH_FAILED` or `refresh token was rejected` | The imported token is fake or another process rotated it; stop the other holder, re-authenticate at cutover (#7), or keep the sanitised copy for tests |
-| The livis plugin writes under `/data/dsh/.dsh/state/...` | `DSH_LIVIS_STATE_DIR` was overridden away from the imported path; unset it or point it at `/Users/matthewye/.dsh/state/livis/livis-source` |
+| The livis plugin writes under `/data/dsh/.dsh/state/...` | `DSH_LIVIS_STATE_DIR` was overridden away from the imported path; unset it or point it at `${OPERATOR_HOME}/.dsh/state/livis/livis-source` |
 | `Bind for 127.0.0.1:3083 failed` | The host livis instance or another container owns 3083; stop it or set `LIVIS_PUBLISH_PORT` |
 | The start exits 2 saying the GitHub token did not pass `gh api user` | The Keychain item is stale or belongs to another account; re-authenticate with `GH_CONFIG_DIR=~/.config/gh-agent gh auth login`, then retry |
 | The container is healthy for a while, then `unhealthy` | The healthcheck calls the management API through the relay; check `docker compose logs superagent` for a stopped runtime or a failed part |

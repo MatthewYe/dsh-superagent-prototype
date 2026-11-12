@@ -16,12 +16,41 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 dsh_version=${DSH_VERSION:-0.2.1-rc.3}
 commit=$(git -C "$root" rev-parse --short=12 HEAD)
 
-livis_dir=${LIVIS_DIR:-/Users/matthewye/Documents/WorkSpace/dsh-livis}
+# The operator identity is baked into the image (home path and numeric uid/gid),
+# so a fresh clone gets neutral defaults while the operator who runs this script
+# gets their own values without extra flags. The identity is deliberately not
+# part of the tag: the tag describes the two source commits and the CLI version.
+operator_home=${OPERATOR_HOME:-$HOME}
+operator_uid=${OPERATOR_UID:-$(id -u)}
+operator_gid=${OPERATOR_GID:-$(id -g)}
+case "$operator_home" in
+  /*) ;;
+  *)
+    echo "docker-build: OPERATOR_HOME must be an absolute path, got '$operator_home'" >&2
+    exit 1
+    ;;
+esac
+case "$operator_uid" in
+  ''|*[!0-9]*)
+    echo "docker-build: OPERATOR_UID must be numeric, got '$operator_uid'" >&2
+    exit 1
+    ;;
+esac
+case "$operator_gid" in
+  ''|*[!0-9]*)
+    echo "docker-build: OPERATOR_GID must be numeric, got '$operator_gid'" >&2
+    exit 1
+    ;;
+esac
+export OPERATOR_HOME="$operator_home" OPERATOR_UID="$operator_uid" OPERATOR_GID="$operator_gid"
+
+livis_dir=${LIVIS_DIR:-${HOME}/Documents/WorkSpace/dsh-livis}
 if [ ! -d "$livis_dir" ]; then
   echo "docker-build: Livis plugin checkout not found at $livis_dir; set LIVIS_DIR to the dsh-livis checkout" >&2
   exit 1
 fi
 livis_dir=$(cd -- "$livis_dir" && pwd)
+export LIVIS_DIR="$livis_dir"
 if [ ! -f "$livis_dir/packages/dsh-livis-source/package.json" ]; then
   echo "docker-build: $livis_dir is not a dsh-livis checkout: packages/dsh-livis-source/package.json is missing" >&2
   exit 1
@@ -42,13 +71,16 @@ fi
 tag="dsh-superagent:${commit}-livis-${livis_commit}-dsh-${dsh_version}"
 image=${SUPERAGENT_IMAGE:-$tag}
 
-echo "docker-build: product $commit, livis $livis_commit, DSH $dsh_version" >&2
+echo "docker-build: product $commit, livis $livis_commit, DSH $dsh_version, operator ${operator_uid}:${operator_gid} at ${operator_home}" >&2
 docker buildx build \
   --load \
   --build-arg "DSH_VERSION=${dsh_version}" \
   --build-arg "PRODUCT_COMMIT=${commit}" \
   --build-arg "LIVIS_COMMIT=${livis_commit}" \
   --build-arg "IMAGE_TAG=${image}" \
+  --build-arg "OPERATOR_HOME=${operator_home}" \
+  --build-arg "OPERATOR_UID=${operator_uid}" \
+  --build-arg "OPERATOR_GID=${operator_gid}" \
   --build-context "livis=${livis_dir}" \
   --tag "$image" \
   --file "$root/Dockerfile" \

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +36,7 @@ const TIMEOUT = Number(process.env.DSH_DOCKER_E2E_TIMEOUT ?? 240_000)
 const SUPERAGENT_PORT = Number(process.env.DSH_DOCKER_E2E_WRAPPER_SUPERAGENT_PORT ?? 38086)
 const LIVIS_PORT = Number(process.env.DSH_DOCKER_E2E_WRAPPER_LIVIS_PORT ?? 38087)
 const PREFIX = process.env.DSH_DOCKER_E2E_WRAPPER_PROJECT ?? `dsh-wrapper-e2e-${process.pid}-${Date.now().toString(36)}`
-const LIVIS_DIR = process.env.LIVIS_DIR ?? '/Users/matthewye/Documents/WorkSpace/dsh-livis'
+const LIVIS_DIR = process.env.LIVIS_DIR ?? join(homedir(), 'Documents', 'WorkSpace', 'dsh-livis')
 
 interface Instance {
   name: 'superagent' | 'livis'

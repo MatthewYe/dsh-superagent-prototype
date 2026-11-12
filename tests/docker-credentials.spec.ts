@@ -37,6 +37,15 @@ const TIMEOUT = Number(process.env.DSH_DOCKER_E2E_TIMEOUT ?? 180_000)
 const REAL_STATE = join(homedir(), '.dsh', 'state', 'superagent')
 const CREDENTIALS = join(homedir(), '.dsh', '.credentials.yaml')
 const OP_ENV = join(homedir(), '.config', 'op', 'llm.env')
+// The image bakes the operator identity as a build input. Derive the expected
+// container paths from the same values the wrapper/build script use, so the
+// spec passes for any operator instead of one hard-coded home.
+const OPERATOR_HOME = process.env.OPERATOR_HOME ?? homedir()
+const OPERATOR_UID = process.env.OPERATOR_UID ?? String(process.getuid?.() ?? 1000)
+const OPERATOR_GID = process.env.OPERATOR_GID ?? String(process.getgid?.() ?? 1000)
+const STATE_PATH = join(OPERATOR_HOME, '.dsh', 'state', 'superagent')
+const GH_AGENT = join(OPERATOR_HOME, '.local', 'bin', 'gh-agent')
+const GH_CONFIG = join(OPERATOR_HOME, '.config', 'gh-agent')
 const PLACEHOLDER_KEY = 'sk-e2e-placeholder-never-a-real-key'
 const IMPORTED_TICKET = 'ticket-imported-by-ticket-03'
 const IMPORTED_TITLE = 'Imported host history is visible in the container'
@@ -89,7 +98,14 @@ function composeFiles(): string[] {
 function compose(args: string[], options: { allowFailure?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {}): Result {
   return run('docker', ['compose', ...composeFiles(), '--project-directory', ROOT, '-p', PROJECT, ...args], {
     ...options,
-    env: { SUPERAGENT_IMAGE: image, SUPERAGENT_PUBLISH_PORT: String(PORT), ...options.env },
+    env: {
+      SUPERAGENT_IMAGE: image,
+      SUPERAGENT_PUBLISH_PORT: String(PORT),
+      OPERATOR_HOME,
+      OPERATOR_UID,
+      OPERATOR_GID,
+      ...options.env,
+    },
   })
 }
 
@@ -104,6 +120,9 @@ function wrapper(command: 'prepare' | 'start' | 'stop' | 'status', extra: NodeJS
       SUPERAGENT_STATE_DIR: stateDir,
       SUPERAGENT_DSH_HOME: dshHome,
       SUPERAGENT_ARTIFACTS_DIR: artifacts,
+      OPERATOR_HOME,
+      OPERATOR_UID,
+      OPERATOR_GID,
       DEEPSEEK_API_KEY: realKey ?? PLACEHOLDER_KEY,
       ...extra,
     },
@@ -231,7 +250,14 @@ describe.skipIf(!ENABLED)('docker credentials and one-time state import (ticket 
 
     const built = process.env.DSH_DOCKER_E2E_IMAGE
       ?? run('bash', [join(ROOT, 'scripts', 'docker-build')], {
-        env: { ...process.env, SUPERAGENT_IMAGE: '', BUILDX_CONFIG: '/tmp/dsh-buildx-ticket03' },
+        env: {
+          ...process.env,
+          SUPERAGENT_IMAGE: '',
+          OPERATOR_HOME,
+          OPERATOR_UID,
+          OPERATOR_GID,
+          BUILDX_CONFIG: '/tmp/dsh-buildx-ticket03',
+        },
         timeout: 40 * 60_000,
       }).stdout.trim().split('\n').at(-1)!.trim()
     image = built
@@ -276,7 +302,13 @@ describe.skipIf(!ENABLED)('docker credentials and one-time state import (ticket 
       }
     }
     run('docker', ['compose', ...composeFiles(), '--project-directory', ROOT, '-p', PROJECT, 'down', '--volumes', '--remove-orphans', '--timeout', '10'], {
-      env: { SUPERAGENT_IMAGE: image, SUPERAGENT_PUBLISH_PORT: String(PORT) },
+      env: {
+        SUPERAGENT_IMAGE: image,
+        SUPERAGENT_PUBLISH_PORT: String(PORT),
+        OPERATOR_HOME,
+        OPERATOR_UID,
+        OPERATOR_GID,
+      },
       allowFailure: true,
       timeout: 120_000,
     })
@@ -295,7 +327,7 @@ describe.skipIf(!ENABLED)('docker credentials and one-time state import (ticket 
     expect(statSync(join(runtime, 'credentials.yaml')).mode & 0o777).toBe(0o600)
     expect(hashFile(join(runtime, 'credentials.yaml'))).toBe(hostsHashBefore)
     const override = readFileSync(join(runtime, 'compose.runtime.yaml'), 'utf8')
-    expect(override).toContain('/Users/matthewye/.config/gh-agent/hosts.yml')
+    expect(override).toContain(`target: "${GH_CONFIG}/hosts.yml"`)
     expect(override).toContain('/run/superagent/credentials.yaml')
     expect(override).toContain('read_only: true')
     expect(override).not.toContain('oauth_token')
@@ -303,7 +335,7 @@ describe.skipIf(!ENABLED)('docker credentials and one-time state import (ticket 
 
     // The container sees a 0600 DSH credential copy, not the host path.
     const credentialLine = compose(['exec', '-T', 'superagent', 'stat', '-c', '%a %u %g', '/data/dsh/.credentials.yaml']).stdout.trim()
-    expect(credentialLine).toBe('600 501 20')
+    expect(credentialLine).toBe(`600 ${OPERATOR_UID} ${OPERATOR_GID}`)
     expect(compose(['exec', '-T', 'superagent', 'sha256sum', '/data/dsh/.credentials.yaml']).stdout.split(/\s+/)[0]).toBe(hostsHashBefore)
 
     // The imported worker-gitconfig names the in-image shim, so the shim must
@@ -311,27 +343,27 @@ describe.skipIf(!ENABLED)('docker credentials and one-time state import (ticket 
     // reliably available in this sandbox (the Keychain item can be a fixture),
     // so the shim contract is proved with a stub and the live network calls run
     // only when GitHub accepts the imported token.
-    expect(compose(['exec', '-T', 'superagent', 'test', '-x', '/Users/matthewye/.local/bin/gh-agent']).status).toBe(0)
-    const auth = compose(['exec', '-T', '--user', '501:20', 'superagent', '/Users/matthewye/.local/bin/gh-agent', 'auth', 'status'], { allowFailure: true })
+    expect(compose(['exec', '-T', 'superagent', 'test', '-x', GH_AGENT]).status).toBe(0)
+    const auth = compose(['exec', '-T', '--user', `${OPERATOR_UID}:${OPERATOR_GID}`, 'superagent', GH_AGENT, 'auth', 'status'], { allowFailure: true })
     expect(`${auth.stdout}${auth.stderr}`).toMatch(/github\.com/i)
-    const api = compose(['exec', '-T', '--user', '501:20', 'superagent', '/Users/matthewye/.local/bin/gh-agent', 'api', 'user', '--jq', '.login'], { allowFailure: true })
+    const api = compose(['exec', '-T', '--user', `${OPERATOR_UID}:${OPERATOR_GID}`, 'superagent', GH_AGENT, 'api', 'user', '--jq', '.login'], { allowFailure: true })
     const githubUsable = auth.status === 0 && api.status === 0 && /^[A-Za-z0-9-]+$/.test(api.stdout.trim())
 
     const stub = Buffer.from(`#!/bin/sh
 case "$1 $2" in
-  "auth status") echo "github.com"; echo "Logged in to github.com account matthewye-agent (stub)"; exit 0 ;;
-  "api user") test -f "$GH_CONFIG_DIR/hosts.yml" && echo "stub-matthewye-agent" || exit 1; exit 0 ;;
-  "auth git-credential") printf 'username=matthewye-agent\\npassword=stub-token\\n\\n'; exit 0 ;;
+  "auth status") echo "github.com"; echo "Logged in to github.com account agent-under-test (stub)"; exit 0 ;;
+  "api user") test -f "$GH_CONFIG_DIR/hosts.yml" && echo "stub-agent-under-test" || exit 1; exit 0 ;;
+  "auth git-credential") printf 'username=agent-under-test\\npassword=stub-token\\n\\n'; exit 0 ;;
 esac
 echo "stub gh: $*" >&2; exit 1
 `).toString('base64')
     compose(['exec', '-T', 'superagent', 'sh', '-c', `mkdir -p /tmp/gh-stub && printf %s '${stub}' | base64 -d > /tmp/gh-stub/gh && chmod 0755 /tmp/gh-stub/gh`])
-    const stubLogin = compose(['exec', '-T', '--user', '501:20', 'superagent', 'env', 'PATH=/tmp/gh-stub:/usr/local/bin:/usr/bin:/bin', 'sh', '-c',
-      'GH_CONFIG_DIR=/Users/matthewye/.config/gh-agent /Users/matthewye/.local/bin/gh-agent api user --jq .login']).stdout.trim()
-    expect(stubLogin).toBe('stub-matthewye-agent')
-    const credential = compose(['exec', '-T', '--user', '501:20', 'superagent', 'sh', '-c',
-      'printf "protocol=https\\nhost=github.com\\n\\n" | env GIT_CONFIG_GLOBAL=/Users/matthewye/.dsh/state/superagent/worker-gitconfig PATH=/tmp/gh-stub:/usr/local/bin:/usr/bin:/bin git credential fill']).stdout
-    expect(credential).toContain('username=matthewye-agent')
+    const stubLogin = compose(['exec', '-T', '--user', `${OPERATOR_UID}:${OPERATOR_GID}`, 'superagent', 'env', 'PATH=/tmp/gh-stub:/usr/local/bin:/usr/bin:/bin', 'sh', '-c',
+      `GH_CONFIG_DIR=${GH_CONFIG} ${GH_AGENT} api user --jq .login`]).stdout.trim()
+    expect(stubLogin).toBe('stub-agent-under-test')
+    const credential = compose(['exec', '-T', '--user', `${OPERATOR_UID}:${OPERATOR_GID}`, 'superagent', 'sh', '-c',
+      `printf "protocol=https\\nhost=github.com\\n\\n" | env GIT_CONFIG_GLOBAL=${STATE_PATH}/worker-gitconfig PATH=/tmp/gh-stub:/usr/local/bin:/usr/bin:/bin git credential fill`]).stdout
+    expect(credential).toContain('username=agent-under-test')
     expect(credential).toContain('password=stub-token')
 
     if (!githubUsable) {
@@ -342,8 +374,8 @@ echo "stub gh: $*" >&2; exit 1
     // The repository is public, so this exercises the configured URL and the
     // container network even when the imported token is rejected; the credential
     // path itself is covered by the git credential fill assertion above.
-    const remote = compose(['exec', '-T', '--user', '501:20', 'superagent', 'env',
-      'GIT_CONFIG_GLOBAL=/Users/matthewye/.dsh/state/superagent/worker-gitconfig',
+    const remote = compose(['exec', '-T', '--user', `${OPERATOR_UID}:${OPERATOR_GID}`, 'superagent', 'env',
+      `GIT_CONFIG_GLOBAL=${STATE_PATH}/worker-gitconfig`,
       'git', 'ls-remote', `https://github.com/${repository}.git`, 'HEAD']).stdout
     expect(remote).toMatch(/^[0-9a-f]{40}\tHEAD/m)
 

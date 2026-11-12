@@ -32,11 +32,16 @@ ARG DSH_VERSION=0.2.1-rc.3
 ARG PRODUCT_COMMIT=unknown
 ARG LIVIS_COMMIT=unknown
 ARG IMAGE_TAG=unspecified
-# The live host instances keep their state under these absolute paths; the
-# container preserves them and backs each with a named volume, so state copied in
-# later (ticket #3) needs no path translation.
-ARG STATE_DIR=/Users/matthewye/.dsh/state/superagent
-ARG LIVIS_STATE_DIR=/Users/matthewye/.dsh/state/livis
+# The operator identity is a build input, so the image carries no developer's
+# home directory. OPERATOR_HOME is the in-container home path; the wrapper passes
+# the operator's real host home, which keeps the imported absolute paths valid.
+# OPERATOR_UID/GID are the numeric identity the entrypoint runs DeepSeek Harness
+# as. The defaults are neutral: anyone can build the image, and an operator who
+# wants their state paths to line up passes their own home and ids (the wrapper
+# scripts do so by default). State lives under ${OPERATOR_HOME}/.dsh/state.
+ARG OPERATOR_HOME=/home/operator
+ARG OPERATOR_UID=1000
+ARG OPERATOR_GID=1000
 
 LABEL org.opencontainers.image.title="dsh-superagent" \
       org.opencontainers.image.description="The DSH Superagent instances: product, pinned DSH CLI, Livis source plugin and both profile templates" \
@@ -62,24 +67,31 @@ RUN apt-get update \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# uid 501 / gid 20 is the host operator identity on macOS. GID 20 already exists
-# in Debian (dialout), so only the user is added.
-RUN useradd --uid 501 --gid 20 --home-dir /data/dsh --no-create-home --shell /bin/bash superagent \
-    && mkdir -p /data/dsh /opt/superagent-template /opt/livis-template
+# The operator's numeric identity. The Node base image already owns uid/gid 1000
+# (`node`), which collides with the neutral defaults, so the user is allowed to
+# share the numeric id; a gid that does not exist yet is created first.
+RUN set -eux; \
+    case "${OPERATOR_HOME}" in /*) ;; *) echo "OPERATOR_HOME must be an absolute path" >&2; exit 2 ;; esac; \
+    if ! getent group "${OPERATOR_GID}" >/dev/null; then groupadd --gid "${OPERATOR_GID}" superagent; fi; \
+    useradd --non-unique --uid "${OPERATOR_UID}" --gid "${OPERATOR_GID}" \
+        --home-dir /data/dsh --no-create-home --shell /bin/bash superagent; \
+    mkdir -p /data/dsh /opt/superagent-template /opt/livis-template
 
 # The imported orchestrator state (worker-gitconfig and the GitHub Source's `cli`
-# setting) names the host's gh-agent shim by absolute path. Provide the same path
-# in the image, with the runtime hosts.yml mounted read-only over its config dir.
-RUN mkdir -p /Users/matthewye/.local/bin /Users/matthewye/.config/gh-agent \
-    && printf '%s\n' \
+# setting) names the operator's gh-agent shim by absolute path. Provide the same
+# path in the image, with the runtime hosts.yml mounted read-only over its config
+# dir. The path follows OPERATOR_HOME, so the current operator keeps working.
+RUN set -eux; \
+    mkdir -p "${OPERATOR_HOME}/.local/bin" "${OPERATOR_HOME}/.config/gh-agent"; \
+    printf '%s\n' \
         '#!/bin/sh' \
         '# Container-side gh for the imported agent credential; hosts.yml is mounted read-only.' \
-        'GH_CONFIG_DIR="${GH_CONFIG_DIR:-/Users/matthewye/.config/gh-agent}"' \
+        "GH_CONFIG_DIR=\"\${GH_CONFIG_DIR:-${OPERATOR_HOME}/.config/gh-agent}\"" \
         'export GH_CONFIG_DIR' \
         'exec gh "$@"' \
-        > /Users/matthewye/.local/bin/gh-agent \
-    && chmod 0755 /Users/matthewye/.local/bin/gh-agent \
-    && chown -R 501:20 /Users/matthewye
+        > "${OPERATOR_HOME}/.local/bin/gh-agent"; \
+    chmod 0755 "${OPERATOR_HOME}/.local/bin/gh-agent"; \
+    chown -R "${OPERATOR_UID}:${OPERATOR_GID}" "${OPERATOR_HOME}"
 
 ENV npm_config_manage_package_manager_versions=false
 RUN npm install --global "@deepseek-ai/dsh@${DSH_VERSION}" pnpm@11.7.0
@@ -117,14 +129,14 @@ RUN set -eux; \
       '    port: 3082' \
       '- id: dsh-superagent' \
       '  config:' \
-      '    stateDir: /Users/matthewye/.dsh/state/superagent' \
+      "    stateDir: ${OPERATOR_HOME}/.dsh/state/superagent" \
       '# Feishu is optional: uncomment to enable its Source, then set the bot'"'"'s lark-cli on the Feishu Source.' \
       '# - id: dsh-superagent-feishu' \
       '#   disabled: false' \
       > /opt/superagent-template/profiles/superagent/cordis.patch.yml; \
     DSH_HOME=/opt/superagent-template dsh plugin --profile superagent add "link:/opt/dsh-superagent"; \
     ln -sfn /opt/dsh-superagent /opt/superagent-template/profiles/superagent/node_modules/dsh-superagent; \
-    chown -R 501:20 /opt/superagent-template /opt/dsh-superagent
+    chown -R "${OPERATOR_UID}:${OPERATOR_GID}" /opt/superagent-template /opt/dsh-superagent
 
 # Bake the `livis` profile with its own loopback port, its own absolute state
 # directory and the account-routed model. `DSH_LIVIS_STATE_DIR` is a runtime
@@ -140,7 +152,7 @@ RUN set -eux; \
       '    port: 3083' \
       '- id: dsh-superagent' \
       '  config:' \
-      '    stateDir: /Users/matthewye/.dsh/state/livis' \
+      "    stateDir: ${OPERATOR_HOME}/.dsh/state/livis" \
       '- id: agent-default-model' \
       '  config:' \
       '    provider: deepseek-account' \
@@ -153,12 +165,15 @@ RUN set -eux; \
     DSH_HOME=/opt/livis-template dsh plugin --profile livis add "link:/opt/dsh-livis/packages/dsh-livis-source"; \
     ln -sfn /opt/dsh-superagent /opt/livis-template/profiles/livis/node_modules/dsh-superagent; \
     ln -sfn /opt/dsh-livis/packages/dsh-livis-source /opt/livis-template/profiles/livis/node_modules/dsh-livis-source; \
-    chown -R 501:20 /opt/livis-template /opt/dsh-livis /opt/superagent-template /opt/dsh-superagent /data/dsh
+    chown -R "${OPERATOR_UID}:${OPERATOR_GID}" /opt/livis-template /opt/dsh-livis /opt/superagent-template /opt/dsh-superagent /data/dsh
 
 ENV DSH_HOME=/data/dsh \
     HOME=/data/dsh \
-    PATH=/Users/matthewye/.local/bin:$PATH \
-    SUPERAGENT_STATE_DIR=${STATE_DIR} \
+    OPERATOR_HOME=${OPERATOR_HOME} \
+    OPERATOR_UID=${OPERATOR_UID} \
+    OPERATOR_GID=${OPERATOR_GID} \
+    PATH=${OPERATOR_HOME}/.local/bin:$PATH \
+    SUPERAGENT_STATE_DIR=${OPERATOR_HOME}/.dsh/state/superagent \
     SUPERAGENT_TEMPLATE=/opt/superagent-template \
     SUPERAGENT_CREDENTIALS_SOURCE=/run/superagent/credentials.yaml \
     SUPERAGENT_RELAY_HOST=0.0.0.0 \

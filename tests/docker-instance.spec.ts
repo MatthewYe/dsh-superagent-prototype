@@ -12,6 +12,7 @@ let scratch: string | undefined
 
 interface Harness {
   root: string
+  operatorHome: string
   artifacts: string
   state: string
   dshHome: string
@@ -32,6 +33,7 @@ function harness(): Harness {
   const root = mkdtempSync(join(tmpdir(), 'docker-instance-spec-'))
   scratch = root
   const bin = join(root, 'bin')
+  const operatorHome = join(root, 'home')
   const artifacts = join(root, 'artifacts')
   const state = join(root, 'state')
   const dshHome = join(root, 'dsh')
@@ -43,7 +45,7 @@ function harness(): Harness {
   mkdirSync(bin)
   mkdirSync(state)
   mkdirSync(dshHome)
-  writeFileSync(join(state, 'worker-gitconfig'), '[credential]\n\thelper = !/Users/matthewye/.local/bin/gh-agent auth git-credential\n')
+  writeFileSync(join(state, 'worker-gitconfig'), `[credential]\n\thelper = !${operatorHome}/.local/bin/gh-agent auth git-credential\n`)
   writeFileSync(join(state, 'worker-bin'), 'shim\n')
   writeFileSync(join(dshHome, '.credentials.yaml'), 'version: 1\nrecords: {}\nrefs: {}\n', { mode: 0o600 })
   writeFileSync(join(root, 'llm.env'), 'DEEPSEEK_API_KEY=op://AI Keys/DeepSeek API Key/credential\n', { mode: 0o600 })
@@ -108,7 +110,10 @@ exit 0`)
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    HOME: join(root, 'home'),
+    HOME: operatorHome,
+    OPERATOR_HOME: operatorHome,
+    OPERATOR_UID: '4242',
+    OPERATOR_GID: '4243',
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     SUPERAGENT_IMAGE: 'dsh-superagent:test',
     SUPERAGENT_INSTANCE: 'unit',
@@ -137,7 +142,7 @@ exit 0`)
     FAKE_OP_WHOAMI: '0',
   }
   delete env.DEEPSEEK_API_KEY
-  return { root, artifacts, state, dshHome, trace, ghTrace, marker, volume, existing, env }
+  return { root, operatorHome, artifacts, state, dshHome, trace, ghTrace, marker, volume, existing, env }
 }
 
 function run(h: Harness, command: string, env: NodeJS.ProcessEnv = h.env, extra: string[] = []) {
@@ -166,7 +171,7 @@ describe('scripts/docker-instance', () => {
     const override = readFileSync(join(runtime, 'compose.runtime.yaml'), 'utf8')
     expect(override).toContain('DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"')
     expect(override).not.toContain('gho_unit_token')
-    expect(override).toContain('target: /Users/matthewye/.config/gh-agent/hosts.yml')
+    expect(override).toContain(`target: "${h.operatorHome}/.config/gh-agent/hosts.yml"`)
     expect(override).toContain('target: /run/superagent/credentials.yaml')
     expect(override).toContain('read_only: true')
 

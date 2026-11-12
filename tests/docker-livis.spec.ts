@@ -36,7 +36,11 @@ const INSTANCE = 'livis'
 const TIMEOUT = Number(process.env.DSH_DOCKER_E2E_TIMEOUT ?? 240_000)
 const REAL_STATE = join(homedir(), '.dsh', 'state', 'livis')
 const CREDENTIALS = join(homedir(), '.dsh', '.credentials.yaml')
-const LIVIS_DIR = process.env.LIVIS_DIR ?? '/Users/matthewye/Documents/WorkSpace/dsh-livis'
+const LIVIS_DIR = process.env.LIVIS_DIR ?? join(homedir(), 'Documents', 'WorkSpace', 'dsh-livis')
+const OPERATOR_HOME = process.env.OPERATOR_HOME ?? homedir()
+const OPERATOR_UID = process.env.OPERATOR_UID ?? String(process.getuid?.() ?? 1000)
+const OPERATOR_GID = process.env.OPERATOR_GID ?? String(process.getgid?.() ?? 1000)
+const LIVIS_STATE_PATH = join(OPERATOR_HOME, '.dsh', 'state', 'livis')
 const FAKE_REFRESH = 'livis-e2e-fake-refresh-token-never-a-valid-credential'
 const MARKER_SETTING = 9
 
@@ -88,6 +92,9 @@ function compose(args: string[], options: { env?: NodeJS.ProcessEnv; allowFailur
       SUPERAGENT_IMAGE: image,
       SUPERAGENT_PUBLISH_PORT: String(SUPERAGENT_PORT),
       LIVIS_PUBLISH_PORT: String(PORT),
+      OPERATOR_HOME,
+      OPERATOR_UID,
+      OPERATOR_GID,
       ...options.env,
     },
   })
@@ -102,6 +109,9 @@ function wrapper(command: 'prepare' | 'start' | 'stop' | 'status', options: { en
     SUPERAGENT_STATE_DIR: stateDir,
     SUPERAGENT_DSH_HOME: dshHome,
     SUPERAGENT_ARTIFACTS_DIR: artifacts,
+    OPERATOR_HOME,
+    OPERATOR_UID,
+    OPERATOR_GID,
     // The livis suite is about the second instance, not the operator's GitHub
     // login. A local stub keeps the wrapper's token validation deterministic
     // while still staging the hosts.yml the container would receive.
@@ -246,7 +256,14 @@ describe.skipIf(!ENABLED)('docker livis instance with its plugin and sanitised s
 
     const built = process.env.DSH_DOCKER_E2E_IMAGE
       ?? run('bash', [join(ROOT, 'scripts', 'docker-build')], {
-        env: { ...process.env, SUPERAGENT_IMAGE: '', BUILDX_CONFIG: '/tmp/dsh-buildx-ticket04' },
+        env: {
+          ...process.env,
+          SUPERAGENT_IMAGE: '',
+          OPERATOR_HOME,
+          OPERATOR_UID,
+          OPERATOR_GID,
+          BUILDX_CONFIG: '/tmp/dsh-buildx-ticket04',
+        },
         timeout: 40 * 60_000,
       }).stdout.trim().split('\n').at(-1)!.trim()
     image = built
@@ -307,8 +324,8 @@ describe.skipIf(!ENABLED)('docker livis instance with its plugin and sanitised s
     const cid = container()
     check(cid.length > 0, 'the livis container is not running')
     const env = compose(['exec', '-T', INSTANCE, 'printenv', 'DSH_LIVIS_STATE_DIR']).stdout.trim()
-    expect(env).toBe('/Users/matthewye/.dsh/state/livis/livis-source')
-    expect(compose(['exec', '-T', INSTANCE, 'test', '-f', '/Users/matthewye/.dsh/state/livis/livis-source/client/state.json'], { allowFailure: true }).status).toBe(0)
+    expect(env).toBe(`${LIVIS_STATE_PATH}/livis-source`)
+    expect(compose(['exec', '-T', INSTANCE, 'test', '-f', `${LIVIS_STATE_PATH}/livis-source/client/state.json`], { allowFailure: true }).status).toBe(0)
     expect(compose(['exec', '-T', INSTANCE, 'test', '!', '-e', '/data/dsh/.dsh/state/livis/livis-source'], { allowFailure: true }).status).toBe(0)
 
     const state = await managementJson('state')
@@ -340,7 +357,7 @@ describe.skipIf(!ENABLED)('docker livis instance with its plugin and sanitised s
     expect(cid.startsWith(mounting[0]!) || mounting[0]!.startsWith(cid)).toBe(true)
     const volumes = run('docker', ['inspect', cid, '--format', '{{json .Mounts}}']).stdout
     expect(volumes).toContain(`${PROJECT}_livis-state`)
-    expect(volumes).toContain('/Users/matthewye/.dsh/state/livis')
+    expect(volumes).toContain(LIVIS_STATE_PATH)
   }, 10 * 60_000)
 
   it('keeps the imported state across a wrapper stop/start and preserves the one-container rule', async () => {

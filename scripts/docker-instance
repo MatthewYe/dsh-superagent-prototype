@@ -68,11 +68,11 @@ publish=${SUPERAGENT_PUBLISH_PORT:-$default_publish}
 state_dir=${SUPERAGENT_STATE_DIR:-$default_state}
 dsh_home=${SUPERAGENT_DSH_HOME:-$HOME/.dsh}
 gh_service=${SUPERAGENT_GH_KEYCHAIN_SERVICE:-gh:github.com}
-gh_account=${SUPERAGENT_GH_KEYCHAIN_ACCOUNT:-matthewye-agent}
+gh_account=${SUPERAGENT_GH_KEYCHAIN_ACCOUNT:-}
 gh_bin=${SUPERAGENT_GH_BIN:-gh}
 gh_config_dir=${SUPERAGENT_GH_CONFIG_DIR:-$HOME/.config/gh-agent}
 op_env=${SUPERAGENT_OP_ENV_FILE:-$HOME/.config/op/llm.env}
-livis_dir=${LIVIS_DIR:-/Users/matthewye/Documents/WorkSpace/dsh-livis}
+livis_dir=${LIVIS_DIR:-${HOME}/Documents/WorkSpace/dsh-livis}
 artifacts=${SUPERAGENT_ARTIFACTS_DIR:-$root/.artifacts}
 runtime=$artifacts/instances/$instance
 volume=${project}_${default_volume_suffix}
@@ -82,6 +82,23 @@ docker_bin=${SUPERAGENT_DOCKER_BIN:-docker}
 op_bin=${SUPERAGENT_OP_BIN:-op}
 pgrep_bin=${SUPERAGENT_PGREP_BIN:-pgrep}
 validated_login=''
+
+# The operator identity mirrors the image's build args: OPERATOR_HOME is the
+# container-side home path (the host home by default, which keeps the imported
+# absolute paths valid), OPERATOR_UID/GID are the numeric runtime identity.
+# Exporting them makes Compose interpolate the same paths the image was built
+# with.
+operator_home=${OPERATOR_HOME:-$HOME}
+operator_uid=${OPERATOR_UID:-$(id -u)}
+operator_gid=${OPERATOR_GID:-$(id -g)}
+export OPERATOR_HOME="$operator_home" OPERATOR_UID="$operator_uid" OPERATOR_GID="$operator_gid"
+
+# The Keychain fallback needs an account name. Prefer an explicit override, then
+# the account already recorded in the operator's gh config; there is no
+# hard-coded personal account.
+if [ -z "$gh_account" ] && [ -f "$gh_config_dir/hosts.yml" ]; then
+  gh_account=$(sed -n 's/^[[:space:]]*user:[[:space:]]*//p' "$gh_config_dir/hosts.yml" 2>/dev/null | head -n 1 || true)
+fi
 
 # The livis profile signs in through the DSH account credential record; only the
 # superagent profile needs DEEPSEEK_API_KEY at start.
@@ -150,18 +167,24 @@ compose() {
     LIVIS_PUBLISH_PORT="$publish" \
     LIVIS_DIR="$livis_dir" \
     LIVIS_COMMIT="${LIVIS_COMMIT:-unknown}" \
+    OPERATOR_HOME="$operator_home" \
+    OPERATOR_UID="$operator_uid" \
+    OPERATOR_GID="$operator_gid" \
     DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
     "$docker_bin" compose "${files[@]}" --project-directory "$root" -p "$project" "$@"
 }
 
 write_hosts_yml() {
-  local path=$1 token=$2
+  local path=$1 token=$2 user=${3:-}
+  # The default comes from SUPERAGENT_GH_KEYCHAIN_ACCOUNT, else the account
+  # already in the operator's gh config, else the login that just validated.
+  user=${user:-${gh_account:-${validated_login:-agent}}}
   {
     printf 'github.com:\n'
     printf '    git_protocol: https\n'
     printf '    users:\n'
-    printf '        %s:\n' "$gh_account"
-    printf '    user: %s\n' "$gh_account"
+    printf '        %s:\n' "$user"
+    printf '    user: %s\n' "$user"
     printf '    oauth_token: %s\n' "$token"
   } > "$path"
   chmod 0600 "$path"
@@ -202,7 +225,10 @@ read_github_token() {
     gh_available=1
     gh_token=$(env -u GH_TOKEN -u GITHUB_TOKEN "GH_CONFIG_DIR=$gh_config_dir" "$gh_bin" auth token 2>/dev/null || true)
   fi
-  keychain_token=$("$security_bin" find-generic-password -s "$gh_service" -a "$gh_account" -w 2>/dev/null || true)
+  keychain_token=''
+  if [ -n "$gh_account" ]; then
+    keychain_token=$("$security_bin" find-generic-password -s "$gh_service" -a "$gh_account" -w 2>/dev/null || true)
+  fi
 
   if [ "$gh_available" -eq 1 ] && [ -n "$gh_token" ]; then
     if validate_github_token "$gh_token"; then
@@ -226,7 +252,7 @@ read_github_token() {
     || config_error "gh is not installed, so the agent's GitHub token cannot be validated. Install gh, then run 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (or export SUPERAGENT_GH_BIN to the gh binary)."
 
   if [ -z "$gh_token" ] && [ -z "$keychain_token" ]; then
-    config_error "no GitHub token for the agent in $gh_config_dir or the macOS Keychain (service '$gh_service', account '$gh_account'). Sign in with 'GH_CONFIG_DIR=$gh_config_dir gh auth login', or check the Keychain item with: security find-generic-password -s '$gh_service' -a '$gh_account' -w. The token is validated with 'gh api user' before it is used."
+    config_error "no GitHub token for the agent in $gh_config_dir or the macOS Keychain (service '$gh_service'${gh_account:+, account '$gh_account'}). Sign in with 'GH_CONFIG_DIR=$gh_config_dir gh auth login', or set SUPERAGENT_GH_KEYCHAIN_ACCOUNT to the Keychain account and check it with: security find-generic-password -s '$gh_service' -a '$gh_account' -w. The token is validated with 'gh api user' before it is used."
   fi
 
   config_error "no usable GitHub token for the agent: neither 'gh auth token' under $gh_config_dir nor the macOS Keychain value for service '$gh_service' passed 'gh api user'. Re-authenticate with 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (the Keychain item may be stale), then retry."
@@ -264,7 +290,7 @@ write_override() {
     printf '    volumes:\n'
     printf '      - type: bind\n'
     printf '        source: "%s"\n' "$runtime/hosts.yml"
-    printf '        target: /Users/matthewye/.config/gh-agent/hosts.yml\n'
+    printf '        target: "%s/.config/gh-agent/hosts.yml"\n' "$operator_home"
     printf '        read_only: true\n'
     if [ -f "$runtime/credentials.yaml" ]; then
       printf '      - type: bind\n'
