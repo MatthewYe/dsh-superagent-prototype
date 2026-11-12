@@ -152,9 +152,9 @@ export function createWebApi(token: string, options: { apiUrl?: string } = {}): 
   return {
     call: async (method, args) => {
       try {
-        return withoutEmptyMetadata(checkedResponse(await client.apiCall(method, args)))
+        return checkedResponse(await client.apiCall(method, args))
       } catch (error) {
-        if (error instanceof WebAPIPlatformError) return withoutEmptyMetadata(checkedResponse(error.data))
+        if (error instanceof WebAPIPlatformError) return checkedResponse(error.data)
         if (error instanceof WebAPIRateLimitedError) throw new SlackRateLimitedError(error.retryAfter)
         if (error instanceof WebAPIHTTPError) throw new SlackTransportError(describeHttpError(error))
         if (error instanceof WebAPIRequestError) throw new SlackTransportError(describeRequestError(error))
@@ -551,15 +551,6 @@ function checkedResponse(value: unknown): SlackApiResponse {
     throw new SlackTransportError('Slack returned an error that could not be parsed')
   }
   return response
-}
-
-/** The SDK adds an empty response_metadata to every answer; the bridge prints Slack's fields only. */
-function withoutEmptyMetadata(response: SlackApiResponse): SlackApiResponse {
-  const metadata = response.response_metadata
-  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length > 0) return response
-  const copy = { ...response }
-  delete copy.response_metadata
-  return copy
 }
 
 function textField(value: unknown): string | undefined {

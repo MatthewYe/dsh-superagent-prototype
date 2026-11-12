@@ -144,8 +144,10 @@ const TEXT = {
   actionAddAllowed: ['去添加', 'Add senders'],
   'problemSetupFix.github': ['在设置 › 来源的 GitHub 卡片修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如登录 CLI），点“重新检查”。', 'Fix it on the GitHub card of the Source settings and save to check again; after a fix outside dsh-superagent, such as signing a CLI in, choose Check again.'],
   'problemSetupFix.feishu': ['在设置 › 来源的飞书卡片修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如配置机器人），点“重新检查”。', 'Fix it on the Feishu card of the Source settings and save to check again; after a fix outside dsh-superagent, such as configuring the bot, choose Check again.'],
+  'problemSetupFix.slack': ['在设置 › 来源的 Slack 卡片修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如运行 slack-bridge auth），点“重新检查”。', 'Fix it on the Slack card of the Source settings and save to check again; after a fix outside dsh-superagent, such as running slack-bridge auth, choose Check again.'],
   'problemSetupFix.deployment': ['在部署设置里修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如升级 git），点“重新检查”。', 'Fix it in the Deployment settings and save to check again; after a fix outside dsh-superagent, such as upgrading git, choose Check again.'],
   'problemSetup.feishu': ['飞书机器人检查未通过，飞书来源暂停', 'Feishu bot check failed; the Feishu Source is paused'],
+  'problemSetup.slack': ['Slack 桥检查未通过，Slack 来源暂停', 'Slack bridge check failed; the Slack Source is paused'],
   // Source
   labelsAdded: ['列表已更新，新增：{names}', 'List updated, added: {names}'],
   labelsCurrent: ['列表已是最新', 'List is up to date'],

@@ -455,6 +455,7 @@ A reply is `chat.postMessage` with three fields:
 }
 ```
 
+No `client_msg_id` is sent: Slack requires a UUID there, while the receipt id is a 32-hex SHA-256 slice, and Slack documents no deduplication. Delivery stays at-least-once (section 10.4).
 
 Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. This is the rule that makes a DM behave like Feishu: each DM message starts its own Thread and the answer is posted under that message (section 16 of the ratified decisions). A top-level channel message starts a Thread the same way, so answers never sprawl into the channel.
 
@@ -486,6 +487,7 @@ Slack has no server-side idempotency key, so the design accepts at-least-once de
 - The Outbox receipt id is deterministic, so a crash and retry produce the same local record.
 - Only one reply is in flight globally, as the Outbox already enforces.
 - A send is retried only after an error. A send that Slack accepted is never retried, because acceptance means `ok: true`.
+- No `client_msg_id` is sent; it would add no deduplication guarantee (section 10.1).
 
 The duplicate risk is a crash between Slack accepting the message and the Outbox settling the receipt. On restart the reply is sent once more, producing two messages with the same text. The window is small, and the alternative, reading the thread back before every retry, costs an API call per send and is not part of v1.
 
@@ -1079,7 +1081,7 @@ The tests follow the patterns already in the repository: real `Store` in a temp 
 | Test | Covers |
 | --- | --- |
 | `tests/slack-trigger.spec.ts` | each event type becomes the expected Trigger; ids are stable across two parses; bot messages (`bot_id`, `bot_profile`, `subtype: 'bot_message'`) are dropped; threads and DMs get the documented thread ids; the same envelope twice yields one Trigger id; edited timestamp does not change the id |
-| `tests/slack-channel.spec.ts` | `chat.postMessage` argv with and without `thread_ts`; text checking; `gone` for `channel_not_found`, `is_archived`, `not_in_channel`; `link` from permalinks including custom domains; `words` asks for the 100-word check |
+| `tests/slack-channel.spec.ts` | `chat.postMessage` argv with and without `thread_ts`; no `client_msg_id`; text checking; `gone` for `channel_not_found`, `is_archived`, `not_in_channel`; `link` from permalinks including custom domains; `words` asks for the 100-word check |
 | `tests/slack-read.spec.ts` | `conversations.replies` pages and oldest-first ordering; a message with `thread_ts` absent reads neighbours; edited text appears from a read; `reply_to` mapping; both URL forms |
 | `tests/slack.spec.ts` | `scope()` for listed, other, and direct with every `listen` combination; admission rows match the table; `channel.allowed` agrees with `scope()`; policy schema rejects a non-`U…`/`W…` id; roster order is preserved; `environment.values` for Slack and non-Slack Triggers; `repliesTo` for a reply and for a parent |
 | `tests/slack-loop.spec.ts` | fake bridge in the modes of section 13.8: ready, warn, flaky, events, late, never; readiness timeout message; backoff numbers 1000/2000/…/60000; stop during spawn; `app_rate_limited` sets a warning; `app_uninstalled` sets an error and stops retrying forever |
