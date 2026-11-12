@@ -8,6 +8,9 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "bin": {
+    "slack-bridge": "./lib/slack-bridge.js"
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -16,6 +19,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./slack-bridge": "./lib/slack-bridge.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
