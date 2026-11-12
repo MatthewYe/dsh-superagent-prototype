@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SettingsSchema } from '../src/policy.ts'
+import { TextCache } from '../src/app/cache.ts'
+import { readResource, type ResourceHost } from '../src/app/resources.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { slackKind } from '../src/sources/slack.ts'
@@ -286,6 +288,35 @@ describe('Slack thread context', () => {
     expect(sources.repliesTo(trigger())).toBeUndefined()
     expect(sources.repliesTo(trigger({ thread_ts: '1712345678.000100', ts: '1712345678.000200' })))
       .toBe(slackTriggerId('C0123ABCD', '1712345678.000100'))
+  })
+
+  it('serves a thread page and its cursor through the slack/ route', async () => {
+    const bridge = fakeBridge({
+      'conversations.replies': page([{ ...message(), ts: '1712345678.000100' }], 'cursor-2'),
+      'conversations.replies:cursor-2': page([{ ...message(), ts: '1712345678.000300' }]),
+    })
+    const source = trigger({ thread_ts: '1712345678.000100', ts: '1712345678.000200' })
+    const host = { store: { triggers: new Map([[source.id, source]]) }, pages: new TextCache(100_000), commands: bridge.commands,
+      masterId: 'main', slackPageSize: () => 10 } as unknown as ResourceHost
+    const first = await readResource(host, `slack/${source.id}/thread`, 0, undefined) as { text: string }
+    expect(JSON.parse(first.text)).toMatchObject({ status: 'available', messages: [{ id: '1712345678.000100' }] })
+    const next = (JSON.parse(first.text) as { next_resource: string }).next_resource
+    expect(next).toBe(`slack/${source.id}/thread/cursor-2`)
+    const second = await readResource(host, next, 0, undefined) as { text: string }
+    expect(JSON.parse(second.text)).toMatchObject({ messages: [{ id: '1712345678.000300' }] })
+    expect(bridge.calls()).toHaveLength(2)
+  })
+
+  it('serves later offsets from the cached page and names Slack when it is cold', async () => {
+    const bridge = fakeBridge({ 'conversations.history:message': page([message()]) })
+    const source = trigger()
+    const host = { store: { triggers: new Map([[source.id, source]]) }, pages: new TextCache(100_000), commands: bridge.commands,
+      masterId: 'main', slackPageSize: () => 10 } as unknown as ResourceHost
+    const resource = `slack/${source.id}/message`
+    expect(await readResource(host, resource, 0, 10)).toMatchObject({ resource, offset: 0 })
+    expect(await readResource(host, resource, 10, 10)).toMatchObject({ resource, offset: 10 })
+    const cold = { ...host, pages: new TextCache(100) }
+    await expect(readResource(cold, resource, 10, 10)).rejects.toThrow('Read this Slack resource from offset 0 first')
   })
 
   it('serves no images through the registry', async () => {

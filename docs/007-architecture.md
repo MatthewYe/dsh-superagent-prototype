@@ -459,7 +459,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 | `tests/slack-trigger.spec.ts` | Slack event translation: mrkdwn tokens, app mentions and DMs, deterministic ids, thread roots, other bots, and dropped self-echo, edits and hidden messages |
 | `tests/slack-channel.spec.ts` | The Slack Channel through a fake bridge: threaded `chat.postMessage` argv, no client ids or blocks, gone and retryable errors, health outcomes, archive links, and the bridge accessor |
-| `tests/slack-read.spec.ts` | Slack thread-context reads through a fake bridge: the five resources, oldest-first replies, cursor paging, the top-level neighbour fallback, Slack error surfaces, Trigger terms and parent links |
+| `tests/slack-read.spec.ts` | Slack thread-context reads through a fake bridge: the five resources, oldest-first replies, cursor paging, the top-level neighbour fallback, Slack error surfaces, Trigger terms and parent links, and the slack/ resource route |
 | `tests/slack.spec.ts` | The Slack kind's scope rows and admission: listed and unlisted conversations, DMs, the reply limit, and `channel.allowed` agreeing with `scope` |
 | `tests/slack-loop.spec.ts` | The Slack socket end to end through a fake bridge: a mention and a DM become Triggers and one Ticket each, unaddressed unlisted messages are dropped, and app, token, rate-limit and team failures report health |
 | `tests/slack-setup.spec.ts` | The Slack config schema and the `slack-bridge` probe against a fake executable: a missing bridge, unreadable answers, rejected tokens, and the resolved profile |
