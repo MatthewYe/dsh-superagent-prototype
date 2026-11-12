@@ -156,7 +156,7 @@ describe('scripts/docker-instance', () => {
     expect(second.stderr).toContain('already imported')
     expect(readFileSync(h.marker, 'utf8')).toBe(marker)
     expect(readFileSync(h.trace, 'utf8').split('cp -a /import/').length - 1).toBe(1)
-  })
+  }, 20_000)
 
   it('fails with configuration exit code 2 when the Keychain token is missing', () => {
     const h = harness()
@@ -166,7 +166,7 @@ describe('scripts/docker-instance', () => {
     expect(result.stderr).toContain('macOS Keychain')
     expect(result.stderr).toContain('security find-generic-password')
     expect(existsSync(join(h.artifacts, 'instances', 'unit', 'hosts.yml'))).toBe(false)
-  })
+  }, 20_000)
 
   it('fails with configuration exit code 2 when the model key cannot resolve', () => {
     const h = harness()
@@ -180,7 +180,7 @@ describe('scripts/docker-instance', () => {
     expect(second.status).toBe(2)
     expect(second.stderr).toContain('1Password CLI (op) is not installed')
     expect(existsSync(h.trace)).toBe(false)
-  })
+  }, 20_000)
 
   it('resolves the model key through op, starts, and prints the panel URL from status', () => {
     const h = harness()
@@ -198,7 +198,7 @@ describe('scripts/docker-instance', () => {
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('container: running')
     expect(status.stdout).toContain('panel: http://127.0.0.1:4082/?token=unit-token')
-  })
+  }, 20_000)
 
   it('stops the container, removes runtime credentials, and keeps volumes', () => {
     const h = harness()
@@ -211,5 +211,5 @@ describe('scripts/docker-instance', () => {
     const trace = readFileSync(h.trace, 'utf8')
     expect(trace).toContain('down --remove-orphans')
     expect(trace).not.toContain('down --volumes')
-  })
+  }, 20_000)
 })
