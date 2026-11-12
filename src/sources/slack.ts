@@ -1,6 +1,8 @@
 /** Slack source kind definition and Cordis plugin entry. */
 import { z } from 'zod'
-import type { SourceKind } from './kind.ts'
+import type { Deployment } from '../deployment.ts'
+import { resolveSlackProfile, slackProfile } from './slack-setup.ts'
+import type { Localized, SourceKind } from './kind.ts'
 
 export const ConversationSchema = z.object({
   conversationId: z.string().regex(/^[CG][A-Z0-9]{5,}$/),
@@ -28,6 +30,12 @@ export const slackKind: SourceKind<SlackConfig> = {
     en: 'Receives messages that mention the bot in these conversations, and the remaining messages in conversations listed for all messages.',
   },
   schema: SlackConfigSchema,
+  setup: { fields: ['cli'], probe: ({ machine, config, run }) => resolveSlackProfile(machine, config, run) },
+  facts: (deployment): Record<string, Localized | string> => {
+    const profile = slackProfile(deployment)
+    const name = profile?.name || profile?.botId
+    return profile ? { bot: { zh: `当前机器人 ${name}`, en: `Current bot ${name}` } } : {}
+  },
   fields: [
     { key: 'cli', type: 'text', label: { zh: 'slack-bridge 路径', en: 'slack-bridge path' },
       hint: { zh: '命令名或绝对路径。保存时用 --version 检查桥，再用 bot token 读取工作区和机器人，然后重启 dsh-superagent。', en: 'A command name or absolute path. Saving checks the bridge with --version, reads the workspace and bot with the bot token, then restarts dsh-superagent.' } },
@@ -44,3 +52,6 @@ export const slackKind: SourceKind<SlackConfig> = {
   ],
   health: ['slack', 'history:slack'],
 }
+
+/** The Slack profile resolved into the deployment's per-source slots, if the Slack probe succeeded. */
+export { slackProfile, type SlackProfile } from './slack-setup.ts'

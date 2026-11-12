@@ -21,6 +21,9 @@ export const SETUP_PROBLEMS = {
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],
   feishuUserIdentity: ['feishu', 'The bot lark-cli allows user identities (strict mode {mode}); give the bot its own lark-cli configuration in strict mode bot, as docs/006-deployment.md describes.'],
   feishuNoBot: ['feishu', 'The Feishu bot API did not return the bot\'s open_id.'],
+  slackBridgeMissing: ['slack', 'The Slack bridge does not work.'],
+  slackBridgeFailed: ['slack', 'The Slack bridge returned an answer dsh-superagent could not read.'],
+  slackAuthFailed: ['slack', 'Slack rejected the bridge token: {error}.'],
 } as const satisfies Record<string, readonly [SetupPlace, string]>
 export type SetupCode = keyof typeof SETUP_PROBLEMS
 /** One setup failure, keyed by its settings card (core card name or Source kind ID). */

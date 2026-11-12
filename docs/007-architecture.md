@@ -377,6 +377,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/sources/slack.ts` | The Slack kind and plugin entry, exported as `./slack-watch`: the config schema, fields and health entries; the socket starts in a later ticket |
+| `src/sources/slack-setup.ts` | The Slack bridge profile probe and schema the Slack kind's deployment slot resolves |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` executable, exported as `./slack-bridge`: one Socket Mode listener that prints Slack's frames as NDJSON, one Web API call, and the token setup; only this entry imports the Slack SDKs |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
