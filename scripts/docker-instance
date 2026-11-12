@@ -4,8 +4,9 @@
 # The container image is stateless. This host-side wrapper materialises the
 # runtime credentials the container must not bake in:
 #
-#   * the agent's GitHub token from the macOS Keychain, as a hosts.yml that is
-#     mounted read-only and removed again on stop;
+#   * the agent's GitHub token, resolved through `gh auth token` (or the macOS
+#     Keychain as a fallback) and validated with `gh api user` before it is
+#     written as a hosts.yml that is mounted read-only and removed again on stop;
 #   * the host's DSH credential store, staged read-only for the entrypoint to
 #     copy into the private DSH home on first start;
 #   * the model key, resolved from the host environment or 1Password and passed
@@ -14,8 +15,8 @@
 # It also imports the host state directory once, after a SQLite WAL checkpoint,
 # and writes the per-boot panel URL under .artifacts/.
 #
-# Exit codes: 0 normal, 1 runtime failure, 2 configuration error (missing
-# Keychain token, missing model key, missing image).
+# Exit codes: 0 normal, 1 runtime failure, 2 configuration error (missing or
+# unvalidated GitHub token, missing model key, missing image).
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -32,6 +33,8 @@ state_dir=${SUPERAGENT_STATE_DIR:-$HOME/.dsh/state/superagent}
 dsh_home=${SUPERAGENT_DSH_HOME:-$HOME/.dsh}
 gh_service=${SUPERAGENT_GH_KEYCHAIN_SERVICE:-gh:github.com}
 gh_account=${SUPERAGENT_GH_KEYCHAIN_ACCOUNT:-matthewye-agent}
+gh_bin=${SUPERAGENT_GH_BIN:-gh}
+gh_config_dir=${SUPERAGENT_GH_CONFIG_DIR:-$HOME/.config/gh-agent}
 op_env=${SUPERAGENT_OP_ENV_FILE:-$HOME/.config/op/llm.env}
 artifacts=${SUPERAGENT_ARTIFACTS_DIR:-$root/.artifacts}
 runtime=$artifacts/instances/$instance
@@ -39,6 +42,7 @@ volume=${project}_superagent-state
 security_bin=${SUPERAGENT_SECURITY_BIN:-security}
 docker_bin=${SUPERAGENT_DOCKER_BIN:-docker}
 op_bin=${SUPERAGENT_OP_BIN:-op}
+validated_login=''
 
 usage() {
   cat >&2 <<'EOF'
@@ -78,13 +82,82 @@ compose() {
     "$docker_bin" compose "${files[@]}" --project-directory "$root" -p "$project" "$@"
 }
 
+write_hosts_yml() {
+  local path=$1 token=$2
+  {
+    printf 'github.com:\n'
+    printf '    git_protocol: https\n'
+    printf '    users:\n'
+    printf '        %s:\n' "$gh_account"
+    printf '    user: %s\n' "$gh_account"
+    printf '    oauth_token: %s\n' "$token"
+  } > "$path"
+  chmod 0600 "$path"
+}
+
+# Prove a candidate token against GitHub before it reaches the runtime file:
+# write it to a throwaway 0700 gh config and ask gh who it is. GH_TOKEN and
+# GITHUB_TOKEN are cleared so the candidate itself must answer. The token is
+# never printed; only the resulting login is reported.
+validate_github_token() {
+  local token=$1 dir login status
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/docker-instance-gh.XXXXXX") \
+    || config_error "could not create a temporary config directory to validate the GitHub token."
+  chmod 0700 "$dir"
+  write_hosts_yml "$dir/hosts.yml" "$token"
+
+  set +e
+  login=$(env -u GH_TOKEN -u GITHUB_TOKEN "GH_CONFIG_DIR=$dir" "$gh_bin" api user --jq .login 2>/dev/null)
+  status=$?
+  set -e
+  rm -rf -- "$dir"
+
+  [ "$status" -eq 0 ] || return 1
+  login=$(printf '%s' "$login" | tr -d '\r\n')
+  [ -n "$login" ] || return 1
+  validated_login=$login
+  return 0
+}
+
+# The Keychain item can be stale while gh has a working token of its own (gh
+# reads the Keychain through its own config), so try gh first, then the raw
+# Keychain value, and accept only a candidate GitHub accepts.
 read_github_token() {
-  local token
-  token=$("$security_bin" find-generic-password -s "$gh_service" -a "$gh_account" -w 2>/dev/null) || true
-  if [ -z "$token" ]; then
-    config_error "no GitHub token for the agent in the macOS Keychain. Expected service '$gh_service', account '$gh_account'. Check it with: security find-generic-password -s '$gh_service' -a '$gh_account' -w"
+  local gh_available=0 gh_token='' keychain_token=''
+  validated_login=''
+
+  if command -v "$gh_bin" >/dev/null 2>&1; then
+    gh_available=1
+    gh_token=$(env -u GH_TOKEN -u GITHUB_TOKEN "GH_CONFIG_DIR=$gh_config_dir" "$gh_bin" auth token 2>/dev/null || true)
   fi
-  printf '%s' "$token"
+  keychain_token=$("$security_bin" find-generic-password -s "$gh_service" -a "$gh_account" -w 2>/dev/null || true)
+
+  if [ "$gh_available" -eq 1 ] && [ -n "$gh_token" ]; then
+    if validate_github_token "$gh_token"; then
+      printf 'docker-instance: validated the agent GitHub token for account %s from %s.\n' "$validated_login" "$gh_config_dir" >&2
+      printf '%s' "$gh_token"
+      return 0
+    fi
+    printf 'docker-instance: the gh auth token under %s did not pass gh api user; trying the macOS Keychain value.\n' "$gh_config_dir" >&2
+  fi
+
+  if [ "$gh_available" -eq 1 ] && [ -n "$keychain_token" ]; then
+    if validate_github_token "$keychain_token"; then
+      printf 'docker-instance: validated the agent GitHub token for account %s from the macOS Keychain.\n' "$validated_login" >&2
+      printf '%s' "$keychain_token"
+      return 0
+    fi
+    printf 'docker-instance: the macOS Keychain value for service %s did not pass gh api user.\n' "$gh_service" >&2
+  fi
+
+  [ "$gh_available" -eq 1 ] \
+    || config_error "gh is not installed, so the agent's GitHub token cannot be validated. Install gh, then run 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (or export SUPERAGENT_GH_BIN to the gh binary)."
+
+  if [ -z "$gh_token" ] && [ -z "$keychain_token" ]; then
+    config_error "no GitHub token for the agent in $gh_config_dir or the macOS Keychain (service '$gh_service', account '$gh_account'). Sign in with 'GH_CONFIG_DIR=$gh_config_dir gh auth login', or check the Keychain item with: security find-generic-password -s '$gh_service' -a '$gh_account' -w. The token is validated with 'gh api user' before it is used."
+  fi
+
+  config_error "no usable GitHub token for the agent: neither 'gh auth token' under $gh_config_dir nor the macOS Keychain value for service '$gh_service' passed 'gh api user'. Re-authenticate with 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (the Keychain item may be stale), then retry."
 }
 
 write_runtime_credentials() {
@@ -93,15 +166,7 @@ write_runtime_credentials() {
   mkdir -p "$artifacts/instances" "$runtime"
   chmod 0700 "$artifacts" "$artifacts/instances" "$runtime"
 
-  {
-    printf 'github.com:\n'
-    printf '    git_protocol: https\n'
-    printf '    users:\n'
-    printf '        %s:\n' "$gh_account"
-    printf '    user: %s\n' "$gh_account"
-    printf '    oauth_token: %s\n' "$token"
-  } > "$runtime/hosts.yml"
-  chmod 0600 "$runtime/hosts.yml"
+  write_hosts_yml "$runtime/hosts.yml" "$token"
 
   if [ -f "$dsh_home/.credentials.yaml" ]; then
     install -m 0600 "$dsh_home/.credentials.yaml" "$runtime/credentials.yaml"
@@ -277,6 +342,13 @@ start() {
   status
 }
 
+remove_runtime_dir() {
+  case "$runtime" in
+    "$artifacts"/instances/*) rm -rf -- "$runtime" ;;
+    *) runtime_error "refusing to remove unexpected runtime path $runtime" ;;
+  esac
+}
+
 stop() {
   if [ -f "$runtime/image" ]; then
     [ -n "$image" ] || image=$(cat "$runtime/image")
@@ -284,13 +356,34 @@ stop() {
       publish=$(cat "$runtime/port")
     fi
   fi
+
+  local containers
+  containers=$("$docker_bin" ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}' 2>/dev/null) \
+    || runtime_error "could not list the containers of project $project; is the Docker daemon running?"
+
+  # Nothing recorded and nothing running: stop is a successful no-op. Without
+  # this, compose would interpolate an empty SUPERAGENT_IMAGE and exit 1.
+  if [ -z "$image" ] && [ -z "$containers" ]; then
+    remove_runtime_dir
+    printf 'docker-instance: %s is already stopped; no runtime image and no container for project %s.\n' \
+      "$instance" "$project"
+    return 0
+  fi
+
+  # A container can outlive the runtime directory (for example when it was
+  # removed by hand); recover its image tag so compose can still resolve.
+  if [ -z "$image" ]; then
+    local container
+    container=$(printf '%s\n' "$containers" | head -n 1)
+    image=$("$docker_bin" inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)
+    [ -n "$image" ] \
+      || runtime_error "container $container is left for project $project but its image tag could not be recovered; remove it with: docker compose -p $project down"
+  fi
+
   if ! compose down --remove-orphans; then
     runtime_error "could not stop the project $project with docker compose."
   fi
-  case "$runtime" in
-    "$artifacts"/instances/*) rm -rf -- "$runtime" ;;
-    *) runtime_error "refusing to remove unexpected runtime path $runtime" ;;
-  esac
+  remove_runtime_dir
   printf 'docker-instance: stopped %s. Volumes %s_superagent-home and %s were kept.\n' \
     "$instance" "$project" "$volume"
 }

@@ -16,6 +16,7 @@ interface Harness {
   state: string
   dshHome: string
   trace: string
+  ghTrace: string
   marker: string
   volume: string
   existing: string
@@ -35,6 +36,7 @@ function harness(): Harness {
   const state = join(root, 'state')
   const dshHome = join(root, 'dsh')
   const trace = join(root, 'trace')
+  const ghTrace = join(root, 'gh-trace')
   const marker = join(root, 'imported')
   const volume = join(root, 'volume')
   const existing = join(root, 'existing')
@@ -48,6 +50,22 @@ function harness(): Harness {
 
   executable(join(bin, 'security'), `[ -n "\${FAKE_TOKEN:-}" ] || exit 1
 printf '%s\\n' "$FAKE_TOKEN"`)
+
+  executable(join(bin, 'gh'), `printf '%s %s config_dir=%s\\n' "$1" "$2" "\${GH_CONFIG_DIR:-}" >> "$FAKE_GH_TRACE"
+case "$1 $2" in
+"auth token")
+  [ -n "\${FAKE_GH_TOKEN:-}" ] || exit 1
+  printf '%s\\n' "$FAKE_GH_TOKEN" ;;
+"api user")
+  [ -f "\${GH_CONFIG_DIR:-}/hosts.yml" ] || exit 1
+  [ -n "$(find "\${GH_CONFIG_DIR:-/nonexistent}" -maxdepth 0 -perm 0700 2>/dev/null)" ] || exit 4
+  [ -n "$(find "\${GH_CONFIG_DIR:-}/hosts.yml" -maxdepth 0 -perm 0600 2>/dev/null)" ] || exit 4
+  token=$(sed -n 's/^ *oauth_token: //p' "\${GH_CONFIG_DIR:-}/hosts.yml")
+  [ -n "\${FAKE_GH_VALID_TOKEN:-}" ] && [ "$token" = "$FAKE_GH_VALID_TOKEN" ] || exit 1
+  printf '%s\\n' "\${FAKE_GH_LOGIN:-agent-test}" ;;
+*)
+  exit 1 ;;
+esac`)
 
   executable(join(bin, 'op'), `case "$1" in
 whoami) exit "\${FAKE_OP_WHOAMI:-0}" ;;
@@ -100,11 +118,17 @@ exit 0`)
     SUPERAGENT_ARTIFACTS_DIR: artifacts,
     SUPERAGENT_GH_KEYCHAIN_SERVICE: 'gh:test',
     SUPERAGENT_GH_KEYCHAIN_ACCOUNT: 'agent-test',
+    SUPERAGENT_GH_BIN: join(bin, 'gh'),
+    SUPERAGENT_GH_CONFIG_DIR: join(root, 'gh-agent'),
     SUPERAGENT_SECURITY_BIN: join(bin, 'security'),
     SUPERAGENT_DOCKER_BIN: join(bin, 'docker'),
     SUPERAGENT_OP_BIN: join(bin, 'op'),
     SUPERAGENT_OP_ENV_FILE: join(root, 'llm.env'),
     FAKE_TOKEN: 'gho_unit_token',
+    FAKE_GH_TOKEN: '',
+    FAKE_GH_VALID_TOKEN: 'gho_unit_token',
+    FAKE_GH_LOGIN: 'agent-test',
+    FAKE_GH_TRACE: ghTrace,
     FAKE_TRACE: trace,
     FAKE_VOLUME: volume,
     FAKE_MARKER: marker,
@@ -112,7 +136,7 @@ exit 0`)
     FAKE_OP_WHOAMI: '0',
   }
   delete env.DEEPSEEK_API_KEY
-  return { root, artifacts, state, dshHome, trace, marker, volume, existing, env }
+  return { root, artifacts, state, dshHome, trace, ghTrace, marker, volume, existing, env }
 }
 
 function run(h: Harness, command: string, env: NodeJS.ProcessEnv = h.env) {
@@ -148,6 +172,9 @@ describe('scripts/docker-instance', () => {
     const trace = readFileSync(h.trace, 'utf8')
     expect(trace).toContain('volume create')
     expect(trace).toContain('cp -a /import/.')
+    const ghTrace = readFileSync(h.ghTrace, 'utf8')
+    expect(ghTrace).toContain('auth token')
+    expect(ghTrace).toContain('api user')
     const marker = readFileSync(h.marker, 'utf8')
     expect(marker).toContain('imported=')
 
@@ -156,6 +183,64 @@ describe('scripts/docker-instance', () => {
     expect(second.stderr).toContain('already imported')
     expect(readFileSync(h.marker, 'utf8')).toBe(marker)
     expect(readFileSync(h.trace, 'utf8').split('cp -a /import/').length - 1).toBe(1)
+  }, 20_000)
+
+  it('prefers a validated gh auth token over a stale Keychain value', () => {
+    const h = harness()
+    const env = {
+      ...h.env,
+      FAKE_TOKEN: 'go-key-stale-keychain-value',
+      FAKE_GH_TOKEN: 'gho_gh_valid_token',
+      FAKE_GH_VALID_TOKEN: 'gho_gh_valid_token',
+    }
+    const result = run(h, 'prepare', env)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('validated the agent GitHub token')
+    expect(result.stderr).not.toContain('go-key-stale-keychain-value')
+    expect(result.stderr).not.toContain('gho_gh_valid_token')
+
+    const runtime = join(h.artifacts, 'instances', 'unit')
+    const hosts = readFileSync(join(runtime, 'hosts.yml'), 'utf8')
+    expect(hosts).toContain('oauth_token: gho_gh_valid_token')
+    expect(hosts).not.toContain('go-key-stale-keychain-value')
+
+    // The candidate is proved in a throwaway 0700 gh config that is removed again.
+    const ghTrace = readFileSync(h.ghTrace, 'utf8')
+    expect(ghTrace).toContain('auth token')
+    expect(ghTrace).toContain('api user')
+    const dirs = [...ghTrace.matchAll(/config_dir=(\S+)/g)].map((match) => match[1]!)
+    expect(dirs.length).toBeGreaterThanOrEqual(2)
+    for (const dir of dirs) expect(existsSync(dir)).toBe(false)
+  }, 20_000)
+
+  it('falls back to the Keychain value when the gh auth token is rejected', () => {
+    const h = harness()
+    const env = {
+      ...h.env,
+      FAKE_TOKEN: 'gho_keychain_valid_token',
+      FAKE_GH_TOKEN: 'gho_rejected_token',
+      FAKE_GH_VALID_TOKEN: 'gho_keychain_valid_token',
+    }
+    const result = run(h, 'prepare', env)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('did not pass gh api user')
+    expect(result.stderr).toContain('from the macOS Keychain')
+    expect(result.stderr).not.toContain('gho_rejected_token')
+    expect(result.stderr).not.toContain('gho_keychain_valid_token')
+    const hosts = readFileSync(join(h.artifacts, 'instances', 'unit', 'hosts.yml'), 'utf8')
+    expect(hosts).toContain('oauth_token: gho_keychain_valid_token')
+    expect(hosts).not.toContain('gho_rejected_token')
+  }, 20_000)
+
+  it('rejects a stale Keychain token and exits 2 when nothing validates', () => {
+    const h = harness()
+    const env = { ...h.env, FAKE_TOKEN: 'go-key-stale-keychain-value', DEEPSEEK_API_KEY: 'sk-present' }
+    const result = run(h, 'start', env)
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('did not pass gh api user')
+    expect(result.stderr).toContain('gh auth login')
+    expect(result.stderr).not.toContain('go-key-stale-keychain-value')
+    expect(existsSync(join(h.artifacts, 'instances', 'unit', 'hosts.yml'))).toBe(false)
   }, 20_000)
 
   it('fails with configuration exit code 2 when the Keychain token is missing', () => {
@@ -211,5 +296,26 @@ describe('scripts/docker-instance', () => {
     const trace = readFileSync(h.trace, 'utf8')
     expect(trace).toContain('down --remove-orphans')
     expect(trace).not.toContain('down --volumes')
+  }, 20_000)
+
+  it('treats a second stop as an already-stopped no-op without SUPERAGENT_IMAGE', () => {
+    const h = harness()
+    expect(run(h, 'start').status).toBe(0)
+    const runtime = join(h.artifacts, 'instances', 'unit')
+    const stopEnv = { ...h.env }
+    delete stopEnv.SUPERAGENT_IMAGE
+
+    const first = run(h, 'stop', stopEnv)
+    expect(first.status, first.stderr).toBe(0)
+    expect(existsSync(runtime)).toBe(false)
+
+    const second = run(h, 'stop', stopEnv)
+    expect(second.status, second.stderr).toBe(0)
+    expect(second.stdout).toContain('already stopped')
+    expect(existsSync(runtime)).toBe(false)
+
+    const trace = readFileSync(h.trace, 'utf8')
+    expect(trace).toContain('ps -a --filter label=com.docker.compose.project=dsh-unit')
+    expect(trace.split('down --remove-orphans').length - 1).toBe(1)
   }, 20_000)
 })

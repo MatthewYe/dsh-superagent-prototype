@@ -24,7 +24,7 @@ The Docker path carries the container skeleton from the deployment ticket and th
 | Capability | Today | Follow-up |
 | --- | --- | --- |
 | Image, container, relay, healthcheck, panel | implemented and covered by the opt-in test | — |
-| Real agent GitHub credential | implemented by `scripts/docker-instance`: Keychain token materialised as a 0600 file, mounted read-only, removed by `stop` | — |
+| Real agent GitHub credential | implemented by `scripts/docker-instance`: the token is resolved and validated, then materialised as a 0600 file, mounted read-only, removed by `stop` | — |
 | Model key and DSH credential | implemented by the start path: key from the environment or `op run`, DSH credential copied into the home volume | — |
 | One-time import of host state | implemented after a SQLite WAL checkpoint, with an idempotent marker and an unchanged host copy | — |
 | `livis` service and plugin | not implemented | #4 |
@@ -32,7 +32,7 @@ The Docker path carries the container skeleton from the deployment ticket and th
 | Hourly recovery of a Docker instance | not implemented; only the Compose restart policy | #5 |
 | Cutover runbook | not written | #7 |
 
-The opt-in test proves the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, the shim and credential plumbing, one-time import with an unchanged host copy, and teardown. It makes a real model call and checks usage only when the model key resolves; otherwise that assertion is skipped and reported. Live GitHub authentication is also skipped, and reported, when the Keychain token is rejected; the shipped stand-in still proves the shim and the git credential path.
+The opt-in test proves the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, the shim and credential plumbing, one-time import with an unchanged host copy, and teardown. It makes a real model call and checks usage only when the model key resolves; otherwise that assertion is skipped and reported. The live GitHub check runs only after the start path has validated the token; if GitHub later rejects it, the test reports that and the shipped stand-in still proves the shim and the git credential path.
 
 ## Docker path
 
@@ -108,15 +108,15 @@ scripts/docker-instance status
 scripts/docker-instance stop
 ```
 
-`start` reads the agent's GitHub token from the macOS Keychain (service `gh:github.com`, account `matthewye-agent`), takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import.
+`start` resolves the agent's GitHub token with `GH_CONFIG_DIR=~/.config/gh-agent gh auth token` (gh reads the macOS Keychain through its own config) and falls back to the raw Keychain item (service `gh:github.com`, account `matthewye-agent`). The chosen token must pass `gh api user` in a temporary 0700 gh config directory before it is written, so a stale Keychain value fails the start with exit code 2 instead of being materialised. `start` also takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import. A second `stop` with no recorded image and no container for the project succeeds as an "already stopped" no-op, so it works without `SUPERAGENT_IMAGE` exported.
 
-The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the wrapper re-executes itself under `op run --env-file`; a signed-out or locked 1Password fails the start. A missing Keychain token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
+The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the wrapper re-executes itself under `op run --env-file`; a signed-out or locked 1Password fails the start. A missing or rejected GitHub token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
 
 Secrets live only in `.artifacts/instances/<instance>/` (mode 0700), never in this repository, [compose.yaml](../compose.yaml) or the image:
 
 | File | Mode | Purpose |
 | --- | --- | --- |
-| `hosts.yml` | 0600 | the Keychain token for `gh`, bind-mounted read-only at the container's `/Users/matthewye/.config/gh-agent/hosts.yml`; removed by `stop` |
+| `hosts.yml` | 0600 | the validated token for `gh`, bind-mounted read-only at the container's `/Users/matthewye/.config/gh-agent/hosts.yml`; removed by `stop` |
 | `credentials.yaml` | 0600 | a copy of the host DSH credential store, bind-mounted read-only at `/run/superagent/credentials.yaml`; the entrypoint copies it into the home volume once |
 | `compose.runtime.yaml` | 0600 | the generated override with those mounts and the model-key environment |
 | `panel-url` | 0600 | the per-boot panel URL printed by `status` |
@@ -197,10 +197,10 @@ The image and the Compose file contain no token. That is deliberate: image layer
 
 `scripts/docker-instance` supplies credentials at start instead:
 
-- the GitHub token is read from the macOS Keychain, written as a 0600 `hosts.yml`, mounted read-only, and removed by `stop`;
+- the GitHub token is resolved through `gh auth token` or the macOS Keychain, validated with `gh api user`, written as a 0600 `hosts.yml`, mounted read-only, and removed by `stop`;
 - the DSH credential store is copied into the private home volume on first start, not baked into the image;
 - the model key is passed only as the Compose process environment; it is never a file in the repository or image;
-- a missing GitHub token or model key stops the start with exit code 2 and an actionable message.
+- a missing or rejected GitHub token or model key stops the start with exit code 2 and an actionable message.
 
 The image provides the same `gh-agent` path the imported `worker-gitconfig` and GitHub Source `cli` setting use. The entrypoint points it at the mounted container `hosts.yml`; git credential helpers therefore work without rewriting the imported state. A direct `docker compose up` without the runtime override still boots, but `gh` is unauthenticated and no model credential is present: use the wrapper for real work.
 
@@ -323,6 +323,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | Symptom | Cause and fix |
 | --- | --- |
 | `SUPERAGENT_IMAGE` is required | Build the image and export the printed tag, or set `SUPERAGENT_IMAGE` to an existing tag |
+| The start exits 2 saying the GitHub token did not pass `gh api user` | The Keychain item is stale or belongs to another account; re-authenticate with `GH_CONFIG_DIR=~/.config/gh-agent gh auth login`, then retry |
 | The container is healthy for a while, then `unhealthy` | The healthcheck calls the management API through the relay; check `docker compose logs superagent` for a stopped runtime or a failed part |
 | `docker compose ps` shows `unhealthy` and setup reports `repositoryUnset` | A fresh volume is unconfigured by design; configure the Source and start through `scripts/docker-instance`, which supplies the credentials. A direct `docker compose up` has none |
 | `Bind for 127.0.0.1:3082 failed: port is already allocated` | A host-profile instance or another container owns the port; stop it or set `SUPERAGENT_PUBLISH_PORT` |
