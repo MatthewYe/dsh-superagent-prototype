@@ -103,6 +103,9 @@ A reference list of the terms this and the later documents use, with their Chine
 | Input | 输入 | Context delivered to a Ticket: fanned-out Triggers, Policy changes, resumes and text |
 | Scope | 范围 | The work a Mandate allows |
 | Strength | 强度 | How strong the basis of a Mandate or an Eval is |
+| Slack | Slack | A chat Source whose connection is a Slack app installed in one workspace |
+| Slack workspace | Slack 工作区 | The tenant of a Slack installation; a Slack user id is meaningful only together with its `team_id` |
+| Conversation | 会话 | A Slack channel or direct message, the receiving scope of a Slack Source; not the domain Channel |
 
 | Group | Values |
 | --- | --- |
