@@ -14,6 +14,7 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { slackKind } from '../src/sources/slack.ts'
 import { runSlack } from '../src/sources/slack-loop.ts'
+import { KV } from '../src/kv.ts'
 import { slackTriggerId } from '../src/sources/slack-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -109,6 +110,7 @@ describe('Slack socket loop', () => {
     await boot(h)
     await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
     expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: slackTriggerId('C0123ABCD', '1712345678.000100'), source: 'slack', addressed: 'mention' })
+    expect(h.store.get(KV.slack.threads('C0123ABCD'))).toMatchObject({ '1712345678.000100': expect.any(String) })
     await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' }))
     expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' })
   })

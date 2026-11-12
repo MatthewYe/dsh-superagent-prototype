@@ -5,7 +5,7 @@ import type { Trigger } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { health, type SourceContext } from './host.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
-import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
+import { SOURCE, slackAdmitted, slackRef, slackScope, slackTrigger } from './slack-trigger.ts'
 import type { SlackConfig } from './slack.ts'
 
 /** The health row the background pass reports through. */
@@ -14,6 +14,10 @@ const HISTORY = 'history:slack'
 const PAGE = 200
 /** How often a configured Source checks for joins, names, and missed messages. */
 const PASS_MS = 60_000
+/** Oldest tracked thread root followed; older roots fall outside the backfill window. */
+const THREAD_DAYS = 14
+/** Most thread roots followed per conversation, newest engagement first. */
+const THREAD_MAX = 100
 
 const MessageSchema = z.looseObject({
   type: z.string().optional(),
@@ -77,8 +81,8 @@ async function historyPages(ctx: SourceContext, conversation: string, oldest: nu
   return messages
 }
 
-/** Reads every page of `conversations.replies` oldest first. */
-async function replyPages(ctx: SourceContext, conversation: string, root: string, latest: number,
+/** Reads every page of `conversations.replies` oldest first, optionally bounded by `oldest`. */
+async function replyPages(ctx: SourceContext, conversation: string, root: string, latest: number, oldest: number | undefined,
   signal: AbortSignal): Promise<SlackMessage[]> {
   const commands = ctx.commands.withSignal(signal)
   const messages: SlackMessage[] = []
@@ -86,6 +90,7 @@ async function replyPages(ctx: SourceContext, conversation: string, root: string
   for (;;) {
     if (signal.aborted) throw signal.reason
     const body: Record<string, unknown> = { channel: conversation, ts: root, latest: slackStamp(latest), limit: PAGE }
+    if (oldest !== undefined) body.oldest = slackStamp(oldest)
     if (cursor) body.cursor = cursor
     const page = HistorySchema.parse(await commands.slackJson(['api', 'conversations.replies', JSON.stringify(body)], HistorySchema))
     if (!page.ok) throw new Error(`conversations.replies failed: ${page.error ?? 'unknown error'}`)
@@ -114,11 +119,33 @@ async function join(ctx: SourceContext, conversation: string): Promise<void> {
 }
 
 /** Collects a translated Trigger when the configured scope admits it; deterministic IDs make overlap harmless. */
-function collect(into: Map<string, Trigger>, input: unknown, config: SlackConfig, profile: SlackProfile): void {
+function collect(into: Map<string, Trigger>, input: unknown, config: SlackConfig, profile: SlackProfile): Trigger | undefined {
   const trigger = slackTrigger(input, { botId: profile.botId, userId: profile.userId }, { teamId: profile.teamId, url: profile.url })
   if (!trigger) return
   if (!slackAdmitted(slackScope(trigger.meta, config), trigger.addressed)) return
   into.set(trigger.id, trigger)
+  return trigger
+}
+
+/** Bounds tracked roots by age and count, newest engagement first, so the follow-up cannot grow without limit. */
+function boundThreads(threads: Record<string, string>, now: number): Record<string, string> {
+  const cutoff = now - THREAD_DAYS * 86_400_000
+  return Object.fromEntries(Object.entries(threads)
+    .filter(([, at]) => { const time = Date.parse(at); return Number.isFinite(time) && time >= cutoff })
+    .sort(([, left], [, right]) => Date.parse(right) - Date.parse(left))
+    .slice(0, THREAD_MAX))
+}
+
+/**
+ * Remembers the root of the thread a live Trigger belongs to, bounded by age and count. Called after admission so the
+ * history pass only follows threads the agent is actually engaged in.
+ */
+export function rememberSlackThread(ctx: SourceContext, trigger: Trigger): void {
+  const ref = slackRef(trigger)
+  if (!ref) return
+  const root = ref.threadTs ?? ref.ts
+  const threads = ctx.state.get(KV.slack.threads(ref.conversation)) ?? {}
+  ctx.state.set(KV.slack.threads(ref.conversation), boundThreads({ ...threads, [root]: new Date().toISOString() }, Date.now()))
 }
 
 /**
@@ -132,19 +159,40 @@ async function backfillConversation(ctx: SourceContext, config: SlackConfig, pro
   const oldest = Math.max(Date.parse(cursor) - 5_000, latest - config.backfillDays * 86_400_000)
   const messages = await historyPages(ctx, conversation, oldest, latest, signal)
   messages.sort((left, right) => Number(left.ts) - Number(right.ts))
+  const stored = ctx.state.get(KV.slack.threads(conversation)) ?? {}
+  const engaged = new Map(Object.entries(stored))
   const triggers = new Map<string, Trigger>()
   const event = (message: SlackMessage) => ({ ...message, channel: conversation, channel_type: direct ? 'im' : 'channel' })
-  for (const message of messages) collect(triggers, event(message), config, profile)
+  const remember = (trigger: Trigger | undefined): void => {
+    if (!trigger) return
+    const ref = slackRef(trigger)
+    if (ref) engaged.set(ref.threadTs ?? ref.ts, started)
+  }
+  for (const message of messages) remember(collect(triggers, event(message), config, profile))
+  const followed = new Set<string>()
   for (const root of messages) {
     if (signal.aborted) throw signal.reason
     const active = (root.reply_count ?? 0) > 0 || (root.latest_reply !== undefined && slackTime(root.latest_reply) > Date.parse(cursor))
     if (!active) continue
-    const replies = await replyPages(ctx, conversation, root.ts, latest, signal)
+    followed.add(root.ts)
+    const replies = await replyPages(ctx, conversation, root.ts, latest, undefined, signal)
     replies.sort((left, right) => Number(left.ts) - Number(right.ts))
     for (const reply of replies) {
       if (reply.ts === root.ts) continue
       if (slackTime(reply.ts) < oldest) continue
-      collect(triggers, event(reply), config, profile)
+      remember(collect(triggers, event(reply), config, profile))
+    }
+  }
+  // Roots first seen before this page may still receive replies; follow the bounded set of threads the agent engaged in.
+  for (const root of Object.keys(boundThreads(Object.fromEntries(engaged), latest))) {
+    if (followed.has(root)) continue
+    if (signal.aborted) throw signal.reason
+    const replies = await replyPages(ctx, conversation, root, latest, oldest, signal)
+    replies.sort((left, right) => Number(left.ts) - Number(right.ts))
+    for (const reply of replies) {
+      if (reply.ts === root) continue
+      if (slackTime(reply.ts) < oldest) continue
+      remember(collect(triggers, event(reply), config, profile))
     }
   }
   const ordered = [...triggers.values()].sort((left, right) => Number(left.meta.ts) - Number(right.meta.ts))
@@ -153,6 +201,10 @@ async function backfillConversation(ctx: SourceContext, config: SlackConfig, pro
     await ctx.receive(trigger)
   }
   ctx.state.set(KV.slack.history(conversation), started)
+  // Merge again: live traffic may have tracked a thread while this pass was reading.
+  const current = ctx.state.get(KV.slack.threads(conversation))
+  const threads = boundThreads({ ...current, ...Object.fromEntries(engaged) }, latest)
+  if (Object.keys(threads).length > 0 || current !== undefined) ctx.state.set(KV.slack.threads(conversation), threads)
 }
 
 /**

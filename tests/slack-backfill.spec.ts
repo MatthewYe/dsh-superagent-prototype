@@ -12,6 +12,7 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { slackKind } from '../src/sources/slack.ts'
 import { runSlack } from '../src/sources/slack-loop.ts'
+import { slackHistoryPass } from '../src/sources/slack-history.ts'
 import { KV } from '../src/kv.ts'
 import { slackTriggerId } from '../src/sources/slack-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -28,11 +29,13 @@ const seconds = (offset: number): string => `${BASE + offset}.000100`
 const emptyHistory = { ok: true, has_more: false, messages: [], response_metadata: { next_cursor: '' } }
 
 type Harness = ReturnType<typeof historyHost>
-function historyHost({ plan, chats = [{ conversationId: 'C0PUBLIC1', listen: 'all' as const }], stored = {}, cursors = {} }: {
+function historyHost({ plan, chats = [{ conversationId: 'C0PUBLIC1', listen: 'all' as const }], stored = {}, cursors = {},
+  threads = {} }: {
   plan: SlackPlan
   chats?: { conversationId: string; listen: 'mentions' | 'all' }[]
   stored?: Record<string, boolean>
   cursors?: Record<string, string>
+  threads?: Record<string, Record<string, string>>
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'slack-backfill-'))
   dirs.add(dir)
@@ -45,6 +48,7 @@ function historyHost({ plan, chats = [{ conversationId: 'C0PUBLIC1', listen: 'al
   }))
   if (Object.keys(stored).length) store.set(KV.slack.conversations, stored)
   for (const [conversation, at] of Object.entries(cursors)) store.set(KV.slack.history(conversation), at)
+  for (const [conversation, roots] of Object.entries(threads)) store.set(KV.slack.threads(conversation), roots)
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
   const deployment = testDeployment({ sources: { slack: { ...PROFILE, cli: bridge.cli } } })
@@ -171,6 +175,64 @@ describe('Slack history backfill', () => {
     const replies = h.calls('conversations.replies')
     expect(replies).toHaveLength(1)
     expect(replies[0]!.body).toMatchObject({ ts: root, limit: 200 })
+    await run.stop()
+  })
+
+  it('follows a reply in a tracked thread older than the history page exactly once', async () => {
+    const cursor = new Date(Date.now() - 60_000).toISOString()
+    const root = seconds(-5 * 86_400)
+    const reply = seconds(-20)
+    const h = historyHost({
+      cursors: { C0PUBLIC1: cursor },
+      threads: { C0PUBLIC1: { [root]: new Date().toISOString() } },
+      plan: {
+        'conversations.info:C0PUBLIC1': [{ ok: true, channel: { id: 'C0PUBLIC1', name: 'general', is_member: true, is_private: false } }],
+        'conversations.history:C0PUBLIC1': [emptyHistory],
+        [`conversations.replies:C0PUBLIC1:${root}`]: [{ ok: true, has_more: false, messages: [
+          message(root, { text: 'root', thread_ts: root }),
+          message(seconds(-120), { text: 'old reply', thread_ts: root }),
+          message(reply, { text: 'new reply', thread_ts: root }),
+        ], response_metadata: { next_cursor: '' } }],
+      },
+    })
+    const run = await boot(h)
+    await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
+    const trigger = h.receive.mock.calls[0]![0] as Trigger
+    expect(trigger.meta.ts).toBe(reply)
+    expect(trigger.meta.threadTs).toBe(root)
+    const replies = h.calls('conversations.replies')
+    expect(replies).toHaveLength(1)
+    expect(replies[0]!.body).toMatchObject({ ts: root, limit: 200 })
+    expect(Math.abs(Number(replies[0]!.body.oldest) * 1000 - (Date.parse(cursor) - 5000))).toBeLessThan(2000)
+    expect(h.store.get(KV.slack.threads('C0PUBLIC1'))).toMatchObject({ [root]: expect.any(String) })
+    // The next pass reads only the five-second overlap and must not emit the same reply again.
+    await slackHistoryPass(h.context, new AbortController().signal)
+    expect(h.receive).toHaveBeenCalledTimes(1)
+    await run.stop()
+  })
+
+  it('does not double-count a reply that history and its tracked thread both report', async () => {
+    const cursor = new Date(Date.now() - 60_000).toISOString()
+    const root = seconds(-30)
+    const reply = seconds(-10)
+    const h = historyHost({
+      cursors: { C0PUBLIC1: cursor },
+      threads: { C0PUBLIC1: { [root]: new Date().toISOString() } },
+      plan: {
+        'conversations.info:C0PUBLIC1': [{ ok: true, channel: { id: 'C0PUBLIC1', name: 'general', is_member: true, is_private: false } }],
+        'conversations.history:C0PUBLIC1': [{ ok: true, has_more: false, messages: [
+          message(root, { text: 'root', reply_count: 1, latest_reply: reply }),
+        ], response_metadata: { next_cursor: '' } }],
+        [`conversations.replies:C0PUBLIC1:${root}`]: [{ ok: true, has_more: false, messages: [
+          message(root, { text: 'root', thread_ts: root }),
+          message(reply, { text: 'new reply', thread_ts: root }),
+        ], response_metadata: { next_cursor: '' } }],
+      },
+    })
+    const run = await boot(h)
+    await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(2), { timeout: 10_000 })
+    expect(h.receive.mock.calls.map(call => (call[0] as Trigger).meta.ts)).toEqual([root, reply])
+    expect(h.calls('conversations.replies')).toHaveLength(1)
     await run.stop()
   })
 
