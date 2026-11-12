@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { afterEach, expect, it } from 'vitest'
 import type { Probe } from '../src/deployment.ts'
 import { resolveSlackProfile } from '../src/sources/slack-setup.ts'
-import { SlackConfigSchema, inject, name, slackHealth, slackKind } from '../src/sources/slack.ts'
+import { SlackConfigSchema, inject, name, slackHealth, slackKind, slackProfile } from '../src/sources/slack.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { resolveSourceProfiles } from '../src/app/setup.ts'
@@ -119,7 +119,9 @@ exit 2`)
   expect(resolved.sources.feishu).toEqual({ cli: feishuCli, appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
     name: 'Widgets Bot' })
   expect(resolved.sources).not.toHaveProperty('feishu.cli', slackCli)
-})
+  expect(slackProfile(testDeployment({ sources: resolved.sources }))).toMatchObject({ team: 'Acme', name: 'superagent',
+    botId: 'B01234567', userId: 'U01234567', url: 'https://acme.slack.com/' })
+}, 20_000)
 
 it('words the Slack health rows from what the setup resolved', () => {
   const profile = { cli: '/opt/bin/slack-bridge', teamId: 'T01234567', team: 'Acme', botId: 'B01234567',
