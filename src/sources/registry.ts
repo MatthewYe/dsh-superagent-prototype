@@ -103,6 +103,8 @@ export class SourceRegistry implements SourceScope {
     if (!kind) return 'waiting'
     return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
   }
+  /** The Channel's declared reply word limit, if its kind imposes one. */
+  words(source: string): number | undefined { return this.kinds.get(source)?.channel?.words }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
     const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)
     return link ?? { url: '', label: { zh: channel.source, en: channel.source } }

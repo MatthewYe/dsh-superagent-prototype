@@ -378,6 +378,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/sources/slack.ts` | The Slack kind and plugin entry, exported as `./slack-watch`: the config schema, fields and health entries; the socket starts in a later ticket |
 | `src/sources/slack-trigger.ts` | Slack event validation and Trigger translation: deterministic ids, thread ids, Channels, mrkdwn to text, and dropped self-echo and edits |
+| `src/sources/slack-channel.ts` | The Slack Channel: one threaded `chat.postMessage` through the bridge, Slack error codes mapped to gone, permanent, retryable and health outcomes, and archive links |
 | `src/sources/slack-setup.ts` | The Slack bridge profile probe and schema the Slack kind's deployment slot resolves |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` executable, exported as `./slack-bridge`: one Socket Mode listener that prints Slack's frames as NDJSON, one Web API call, and the token setup; only this entry imports the Slack SDKs |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
@@ -455,6 +456,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 | `tests/slack-trigger.spec.ts` | Slack event translation: mrkdwn tokens, app mentions and DMs, deterministic ids, thread roots, other bots, and dropped self-echo, edits and hidden messages |
+| `tests/slack-channel.spec.ts` | The Slack Channel through a fake bridge: threaded `chat.postMessage` argv, no client ids or blocks, gone and retryable errors, health outcomes, archive links, and the bridge accessor |
 | `tests/slack-setup.spec.ts` | The Slack config schema and the `slack-bridge` probe against a fake executable: a missing bridge, unreadable answers, rejected tokens, and the resolved profile |
 | `tests/slack-bridge.spec.ts` | The `slack-bridge` commands offline: argv and usage, the Web API answers and 429 waits against a loopback stand-in, config precedence, the auth files and their modes, and Socket Mode framing, acks and reconnects |
 | `tests/slack-bridge-build.spec.ts` | The built Slack entries: the `slack-watch` Source export, the `slack-bridge` executable's shebang and mode, one `--version` run, and that no other entry imports the Slack SDKs |
