@@ -16,7 +16,7 @@ export interface Consumer {
   /** Program and arguments, resolved by the deployment profile. */
   command: string
   args: string[]
-  /** Variables added to the inherited environment. */
+  /** Variables added to the inherited environment; PATH is inherited unchanged. */
   env: Record<string, string>
   /** Readiness line on stderr, for example "[event] ready". */
   ready: string
@@ -24,7 +24,7 @@ export interface Consumer {
   listening: string
   /** Error text for a stdout line over 1 MiB. */
   oversized: string
-  /** Called for each stdout line, in order. Rejections restart the consumer. */
+  /** Called for each stdout line, in order; a rejection is reported on the consumer's health entry. */
   line: (line: string) => void | Promise<void>
   /** How long to wait for readiness; 45 seconds by default. */
   timeoutMs?: number
