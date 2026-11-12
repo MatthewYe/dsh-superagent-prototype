@@ -252,6 +252,18 @@ export class Settings {
     }
   }
   /**
+   * Saves one Source's policy part (such as an identity discovered at runtime) as a `'policy'` revision when it differs
+   * from the stored part, reusing `save` for validation, policy versioning, and effects.
+   * @throws SettingsConflict when the `'policy'` block changed while saving; the caller may re-read and retry.
+   */
+  async savePolicyPart(id: string, part: Record<string, unknown>): Promise<void> {
+    const { store } = this.host
+    const revision = store.blockRevision('policy')
+    const policy = store.settings().policy
+    if (JSON.stringify(part) === JSON.stringify(policy.sources[id])) return
+    await this.save('policy', { ...policy, sources: { ...policy.sources, [id]: part } }, revision, 'sync')
+  }
+  /**
    * Rereads a Source's display names (such as Feishu chat names) immediately.
    * @returns Sorted display names (`{ added }`) that were not present in the stored label map before this read.
    * @throws UserError (`noLabels`) when the Source has no label refresh; rethrows a failed read, keeping the stored list.

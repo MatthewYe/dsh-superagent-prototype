@@ -47,6 +47,10 @@ export interface SourceContext {
   readonly problem?: SetupProblem | undefined
   /** Returns a Source's configuration while enabled, or undefined while disabled or uninstalled. */
   config<C extends Record<string, unknown>>(kind: string): C | undefined
+  /** The parsed policy part for a registered Source kind, including its admission table. */
+  policyPart<C>(kind: string): C | undefined
+  /** Saves a Source's policy part through the settings layer, preserving validation, versioning, and policy effects. */
+  savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
   /** Ingests a trigger into the Engine and schedules the next evaluation pass; callers should await completion before advancing read cursors. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   atomic<T>(work: () => T): T

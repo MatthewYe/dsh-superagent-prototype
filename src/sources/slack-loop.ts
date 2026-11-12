@@ -4,7 +4,9 @@ import type { SetupProblem } from '../setup.ts'
 import { KV } from '../kv.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { ConsumerFatal, supervise, type Consumer } from './loop.ts'
+import { slackAuthTest, type SlackAuthReply } from './slack-auth.ts'
 import { runSlackHistory } from './slack-history.ts'
+import { SlackPolicySchema, type SlackPolicy } from './slack-policy.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
 import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
 import type { SlackConfig } from './slack.ts'
@@ -96,8 +98,47 @@ export function slackConsumer(config: SlackConfig, profile: SlackProfile, line: 
   }
 }
 
+/**
+ * Compares the workspace `auth.test` reports with the policy's stored team: the first run records the observed team, and
+ * a different team refuses the loop because Slack user IDs only mean something inside their own workspace.
+ */
+async function checkWorkspace(ctx: SourceContext, reply: SlackAuthReply): Promise<{ refuse: boolean; health?: Health }> {
+  const observed = reply.team_id
+  if (!observed) return { refuse: false }
+  const part = ctx.policyPart<SlackPolicy>(SOURCE)
+  const stored = part?.teamId ?? ''
+  if (!stored) {
+    try {
+      await ctx.savePolicyPart(SOURCE, { ...(part ?? SlackPolicySchema.parse({})), teamId: observed })
+    } catch (error) {
+      // A concurrent roster sync may already have recorded the same team; anything else leaves the identity unknown.
+      if (ctx.policyPart<SlackPolicy>(SOURCE)?.teamId !== observed) {
+        return { refuse: true, health: { state: 'error',
+          detail: `Slack reported workspace ${observed}, but the policy could not record it: ${String(error)}`,
+          at: new Date().toISOString() } }
+      }
+    }
+    return { refuse: false }
+  }
+  if (stored === observed) return { refuse: false }
+  const name = reply.team ? `${reply.team} (${observed})` : observed
+  return { refuse: true, health: { state: 'error', code: 'slackTeamChanged',
+    detail: `Slack is connected to ${name}, but the policy stores the workspace ${stored}`, at: new Date().toISOString() } }
+}
+
+/**
+ * Runs `auth.test` once before the socket or history loops can admit Triggers. A bridge failure is left to the socket
+ * supervisor; without a reply there is no identity to compare.
+ */
+async function startupCheck(ctx: SourceContext): Promise<{ refuse: boolean; health?: Health }> {
+  let reply: SlackAuthReply
+  try { reply = await slackAuthTest(ctx) } catch { return { refuse: false } }
+  if (reply.ok !== true) return { refuse: false }
+  return checkWorkspace(ctx, reply)
+}
+
 /** Reports the starting or paused health rows and, once a profile exists, supervises the socket. */
-export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+export async function watch(ctx: SourceContext, signal: AbortSignal, startup?: Health): Promise<void> {
   await ctx.ready
   if (signal.aborted) return
   const config = ctx.config<SlackConfig>(SOURCE)
@@ -109,12 +150,23 @@ export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<vo
     return
   }
   ctx.report('slack', { state: 'starting', detail: `Connecting to ${profile!.team}` })
+  if (startup) ctx.report('slack', startup)
   ctx.report('history:slack', rows.history)
   const consumer = slackConsumer(config!, profile!, line => handleFrame(ctx, JSON.parse(line) as unknown, config!, profile!))
   await supervise(ctx, consumer, signal)
 }
 
-/** The Slack Source runs its socket loop and its history, join, and name pass together. */
+/** The Slack Source checks its workspace once, then runs its socket loop and its history, join, and name pass together. */
 export const runSlack = async (ctx: SourceContext, signal: AbortSignal): Promise<void> => {
-  await Promise.allSettled([watch, runSlackHistory].map(loop => loop(ctx, signal)))
+  await ctx.ready
+  if (signal.aborted) return
+  const config = ctx.config<SlackConfig>(SOURCE)
+  const profile = slackProfile(ctx.deployment)
+  let startup: { refuse: boolean; health?: Health } = { refuse: false }
+  if (config?.cli && profile) startup = await startupCheck(ctx)
+  if (startup.refuse) {
+    if (startup.health) ctx.report(SOURCE, startup.health)
+    return
+  }
+  await Promise.allSettled([watch(ctx, signal, startup.health), runSlackHistory(ctx, signal)])
 }
