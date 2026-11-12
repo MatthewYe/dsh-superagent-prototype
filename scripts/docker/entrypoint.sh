@@ -20,6 +20,11 @@ fi
 
 mkdir -p "$HOME_DIR" "$STATE_DIR"
 
+# The product locks `<stateDir>.lock` as a sibling of the state directory, so the
+# parent directory must be writable by the operator identity too. The leaf is a
+# mounted volume; its parent lives in the image layer and starts as root.
+chown "$OPERATOR_UID:$OPERATOR_GID" "$(dirname "$STATE_DIR")"
+
 # First start: the home on the volume is empty, so seed it from the baked profile.
 # A later start keeps everything the instance wrote, including its settings.
 if [ ! -f "$HOME_DIR/profiles/superagent/package.json" ]; then
