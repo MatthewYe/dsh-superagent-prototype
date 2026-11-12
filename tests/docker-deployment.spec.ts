@@ -250,7 +250,9 @@ describe.skipIf(!ENABLED)('docker deployment', () => {
     expect(html).toContain('<title>DeepSeek Harness</title>')
 
     // Stopping DSH must make the healthcheck unhealthy; resuming must recover it.
-    const pid = compose('exec', '-T', 'superagent', 'sh', '-c', 'pgrep -f "[d]sh --profile superagent" | head -1').trim()
+    // Match the node process, not the tini wrapper: tini's argv repeats the same
+    // `dsh --profile superagent` command and would otherwise be the first match.
+    const pid = compose('exec', '-T', 'superagent', 'sh', '-c', 'pgrep -f "[n]ode .*dsh --profile superagent" | head -1').trim()
     check(pid.length > 0, 'could not find the DSH process in the container')
     compose('exec', '-T', 'superagent', 'kill', '-STOP', pid)
     await waitFor('the healthcheck to notice stopped DSH', async () => health(cid) === 'unhealthy', 120_000)
