@@ -2,7 +2,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
-import type { Deployment } from '../deployment.ts'
+import type { Deployment, Machine, Probe } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
 
@@ -41,7 +41,15 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
-export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
+/** Deployment facts a channel link may read: the repository and each Source kind's resolved profile. */
+export type ChannelLinks = { repository?: string; sources: Readonly<Record<string, unknown>> }
+/** A Source kind's own deployment slot: the setup-read configuration fields and the probe that resolves its profile. */
+export interface SourceSetup {
+  /** Configuration fields whose values affect setup and restart dsh-superagent when they change. */
+  fields: readonly string[]
+  /** Resolves this kind's deployment profile, or undefined when the kind is unconfigured. Throws SetupError on failure. */
+  probe(input: { machine: Machine; config: Record<string, unknown>; run: Probe; signal: AbortSignal }): Promise<unknown>
+}
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
@@ -94,6 +102,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   fields: FieldSpec[]
   /** Health entry names owned by this kind under `health[...]`; no other kind or core loop may report them. */
   health: string[]
+  /** Deployment slot this kind resolves and the fields setup watches; kinds without one contribute no profile or fields. */
+  setup?: SourceSetup
   /** Listening rule for a trigger (or recorded Mandate basis) of this kind; kinds without `scope` listen to everything they produce and observe none of it. */
   scope?(input: { meta: Record<string, unknown> }, config: C): ScopeResult
   /** Outbound reply adapter; kinds without `channel` produce no replies or channel checks. */

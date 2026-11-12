@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
-import type { FeishuBot } from '../deployment.ts'
+import type { FeishuBot } from './feishu-setup.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
@@ -18,8 +18,9 @@ import type { FeishuConfig } from './feishu.ts'
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
+const feishuBot = (ctx: SourceContext): FeishuBot | undefined => ctx.deployment.sources.feishu as FeishuBot | undefined
 const bot = (ctx: SourceContext): FeishuBot => {
-  const resolved = ctx.deployment.feishu
+  const resolved = feishuBot(ctx)
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
@@ -31,9 +32,9 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
   for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { url: chatLink(ctx, chatId), facts: { chat } })
 }
-const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
+const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(feishuBot(ctx)?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
-  if (ctx.configured() && ctx.deployment.feishu) return true
+  if (ctx.configured() && feishuBot(ctx)) return true
   const waiting = health('paused', ctx.configured() ? 'feishuCliUnset' : 'setupPending')
   ctx.report('feishu', ctx.problem ? { state: 'paused', detail: ctx.problem.detail } : waiting)
   return false
@@ -127,11 +128,11 @@ async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<v
 }
 async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
-  if (!available(ctx)) { ctx.report('history', health('paused', 'feishuBotMissing')); return }
+  if (!available(ctx)) { ctx.report('history:feishu', health('paused', 'feishuBotMissing')); return }
   while (!signal.aborted) {
     const config = enabled(ctx)
     if (!config) {
-      ctx.report('history', health('paused', 'sourceOff'))
+      ctx.report('history:feishu', health('paused', 'sourceOff'))
       await delay(60_000, undefined, { signal }).catch(() => {})
       continue
     }
@@ -153,7 +154,7 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
     }
     await pollThreads(ctx, signal, tally)
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
-    if (!signal.aborted) ctx.report('history', errors.length
+    if (!signal.aborted) ctx.report('history:feishu', errors.length
       ? { state: 'error', detail: errors.join('\n') }
       : { state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}`, at: new Date().toISOString() })
     await delay(60_000, undefined, { signal }).catch(() => {})

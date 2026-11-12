@@ -3,7 +3,7 @@ import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } f
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
-import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
+import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, SourceSetup, TriggerContext, VariableSpec } from './kind.ts'
 
 
 /**
@@ -41,6 +41,12 @@ export class SourceRegistry implements SourceScope {
     return new Map(names.flatMap(name => { const entry = this.health.get(name); return entry ? [[name, entry] as const] : [] }))
   }
   kind(id: string): SourceKind | undefined { return this.kinds.get(id) }
+  /** Every registered kind in registration order. */
+  all(): readonly SourceKind[] { return [...this.kinds.values()] }
+  /** Every registered kind that declares a deployment slot, in registration order. */
+  setups(): { kind: SourceKind; setup: SourceSetup }[] {
+    return [...this.kinds.values()].flatMap(kind => kind.setup ? [{ kind, setup: kind.setup }] : [])
+  }
   /** Every registered kind's instance ordered by ID, followed by stored instances whose kind is not installed (with their config kept as stored). */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
     const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind]), installed: true }))
