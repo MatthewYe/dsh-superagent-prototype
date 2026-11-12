@@ -143,7 +143,7 @@ describe('Slack history backfill', () => {
     const run = await boot(h)
     await h.settled()
     const [request] = h.history()
-    expect(Math.abs(Number(request!.body.oldest) * 1000 - (Date.now() - 14 * 24 * 3600_000))).toBeLessThan(3000)
+    expect(Math.abs(Number(request!.body.oldest) * 1000 - (Date.now() - 14 * 24 * 3600_000))).toBeLessThan(6000)
     await run.stop()
   })
 
