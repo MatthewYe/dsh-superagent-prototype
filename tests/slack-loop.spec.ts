@@ -14,6 +14,8 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { slackKind } from '../src/sources/slack.ts'
 import { runSlack } from '../src/sources/slack-loop.ts'
+import { reportSlackToken } from '../src/sources/slack-auth.ts'
+import type { SlackProfile } from '../src/sources/slack-setup.ts'
 import { slackTriggerId } from '../src/sources/slack-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -48,6 +50,39 @@ if [ "$1" = "listen" ]; then
   exec sleep 60
 fi
 exit 2`
+const REVOKED = `#!/bin/sh
+if [ "$1" = "listen" ]; then
+  echo start >> "$BRIDGE_LOG"
+  printf '%s\\n' "[socket] ready" >&2
+  cat "$BRIDGE_EVENTS"
+  exec sleep 60
+elif [ "$1" = "api" ]; then
+  if [ -n "$3" ]; then printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"; else printf '%s %s\\n' "$2" '{}' >> "$BRIDGE_API"; fi
+  if [ "$2" = "auth.test" ]; then printf '%s\\n' '{"ok":false,"error":"invalid_auth"}'; else printf '%s\\n' '{"ok":true}'; fi
+else
+  exit 2
+fi`
+const RECONNECT = `#!/bin/sh
+if [ "$1" = "listen" ]; then
+  echo start >> "$BRIDGE_LOG"
+  printf '%s\\n' "[socket] ready" >&2
+  if [ "$(grep -c start "$BRIDGE_LOG")" -eq 1 ]; then sleep 1; exit 1; fi
+  cat "$BRIDGE_EVENTS"
+  exec sleep 60
+elif [ "$1" = "api" ]; then
+  if [ -n "$3" ]; then printf '%s %s\\n' "$2" "$3" >> "$BRIDGE_API"; else printf '%s %s\\n' "$2" '{}' >> "$BRIDGE_API"; fi
+  if [ "$2" = "auth.test" ]; then
+    if [ "$(grep -c auth.test "$BRIDGE_API")" -le 3 ]; then
+      printf '%s\\n' '{"ok":true,"team_id":"T01234567","team":"Acme","user_id":"U01234567","bot_id":"B01234567","url":"https://acme.slack.com/"}'
+    else
+      printf '%s\\n' '{"ok":false,"error":"invalid_auth"}'
+    fi
+  else printf '%s\\n' '{"ok":true}'; fi
+else
+  exit 2
+fi`
+const PROFILE: SlackProfile = { cli: '', teamId: 'T01234567', team: 'Acme', botId: 'B01234567', userId: BOT, name: 'superagent',
+  url: 'https://acme.slack.com/' }
 let seq = 0
 const mention = (overrides: Record<string, unknown> = {}) => ({ type: 'app_mention', channel: 'C0123ABCD', channel_type: 'channel',
   user: 'U0123ABCD', text: `<@${BOT}> can you look?`, ts: '1712345678.000100', ...overrides })
@@ -119,7 +154,7 @@ describe('Slack socket loop', () => {
     await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
     expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: slackTriggerId('C0123ABCD', '1712345678.000100'), source: 'slack', addressed: 'mention' })
     await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' }))
-    expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' })
+    await vi.waitFor(() => expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' }))
   })
 
   it('starts the bridge again after it exits and reports the failed poll', async () => {
@@ -239,5 +274,27 @@ describe('Slack socket loop', () => {
     expect(h.starts()).toBe(0)
     expect(h.receive).not.toHaveBeenCalled()
     expect(h.savePolicyPart).not.toHaveBeenCalled()
+  })
+
+  it('reports a revoked token at startup and keeps the socket running for recovery', async () => {
+    const h = loopHost({ events: [], platform: REVOKED })
+    await boot(h)
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' }), { timeout: 10_000 })
+    expect(h.starts()).toBe(1)
+  })
+
+  it('reports a revoked token when the socket restarts', async () => {
+    const h = loopHost({ events: [], platform: RECONNECT })
+    await boot(h)
+    await vi.waitFor(() => expect(h.starts()).toBeGreaterThanOrEqual(2), { timeout: 15_000 })
+    await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' }), { timeout: 10_000 })
+  })
+
+  it('clears the revoked-token error once auth.test succeeds', async () => {
+    const h = loopHost({ events: [] })
+    reportSlackToken(h.context, PROFILE, { ok: false, error: 'token_revoked' })
+    expect(h.board.all.slack).toMatchObject({ state: 'error', code: 'slackTokenRevoked' })
+    reportSlackToken(h.context, PROFILE, { ok: true, team_id: 'T01234567' })
+    expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' })
   })
 })

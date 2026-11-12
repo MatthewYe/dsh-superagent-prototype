@@ -70,5 +70,6 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)
       health.get(entry)?.set(value)
     },
+    healthOf: entry => kind.health.includes(entry) ? health.get(entry)?.get() : undefined,
   }
 }

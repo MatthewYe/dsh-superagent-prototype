@@ -4,7 +4,7 @@ import type { SetupProblem } from '../setup.ts'
 import { KV } from '../kv.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { ConsumerFatal, supervise, type Consumer } from './loop.ts'
-import { slackAuthTest, type SlackAuthReply } from './slack-auth.ts'
+import { checkSlackToken, markTokenEvent, reportSlackToken, slackAuthTest, type SlackAuthReply } from './slack-auth.ts'
 import { runSlackHistory } from './slack-history.ts'
 import { SlackPolicySchema, type SlackPolicy } from './slack-policy.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
@@ -65,6 +65,7 @@ export async function handleFrame(ctx: SourceContext, frame: unknown, config: Sl
     const revoked = RevokedSchema.safeParse(event.tokens)
     const bot = revoked.success ? revoked.data.bot ?? [] : []
     if (bot.includes(profile.userId) || bot.includes(profile.botId)) {
+      markTokenEvent(ctx)
       ctx.report('slack', health('error', 'slackTokenRevoked'))
       throw new ConsumerFatal('The Slack bot token was revoked')
     }
@@ -88,13 +89,14 @@ export async function handleFrame(ctx: SourceContext, frame: unknown, config: Sl
 }
 
 /** Builds the supervised consumer that runs `slack-bridge listen` and lets `handleFrame` translate its stdout. */
-export function slackConsumer(config: SlackConfig, profile: SlackProfile, line: Consumer['line']): Consumer {
+export function slackConsumer(config: SlackConfig, profile: SlackProfile, line: Consumer['line'],
+  onReady?: () => void | Promise<void>): Consumer {
   return {
     kind: SOURCE, name: 'Slack socket', command: config.cli, args: ['listen'], env: {},
     ready: '[socket] ready', listening: `Connected to ${profile.team} as @${profile.name || profile.botId}`,
     oversized: 'The slack-bridge printed a line over 1 MiB',
     failure: (failures, error) => health('error', 'pollFailures', { count: String(failures), error: String(error) }),
-    line,
+    line, onReady,
   }
 }
 
@@ -130,11 +132,12 @@ async function checkWorkspace(ctx: SourceContext, reply: SlackAuthReply): Promis
  * Runs `auth.test` once before the socket or history loops can admit Triggers. A bridge failure is left to the socket
  * supervisor; without a reply there is no identity to compare.
  */
-async function startupCheck(ctx: SourceContext): Promise<{ refuse: boolean; health?: Health }> {
+async function startupCheck(ctx: SourceContext): Promise<{ refuse: boolean; health?: Health; reply?: SlackAuthReply }> {
   let reply: SlackAuthReply
   try { reply = await slackAuthTest(ctx) } catch { return { refuse: false } }
-  if (reply.ok !== true) return { refuse: false }
-  return checkWorkspace(ctx, reply)
+  if (reply.ok !== true) return { refuse: false, reply }
+  const workspace = await checkWorkspace(ctx, reply)
+  return { ...workspace, reply }
 }
 
 /** Reports the starting or paused health rows and, once a profile exists, supervises the socket. */
@@ -152,7 +155,8 @@ export async function watch(ctx: SourceContext, signal: AbortSignal, startup?: H
   ctx.report('slack', { state: 'starting', detail: `Connecting to ${profile!.team}` })
   if (startup) ctx.report('slack', startup)
   ctx.report('history:slack', rows.history)
-  const consumer = slackConsumer(config!, profile!, line => handleFrame(ctx, JSON.parse(line) as unknown, config!, profile!))
+  const consumer = slackConsumer(config!, profile!, line => handleFrame(ctx, JSON.parse(line) as unknown, config!, profile!),
+    () => checkSlackToken(ctx, profile!).then(() => undefined))
   await supervise(ctx, consumer, signal)
 }
 
@@ -162,11 +166,12 @@ export const runSlack = async (ctx: SourceContext, signal: AbortSignal): Promise
   if (signal.aborted) return
   const config = ctx.config<SlackConfig>(SOURCE)
   const profile = slackProfile(ctx.deployment)
-  let startup: { refuse: boolean; health?: Health } = { refuse: false }
+  let startup: { refuse: boolean; health?: Health; reply?: SlackAuthReply } = { refuse: false }
   if (config?.cli && profile) startup = await startupCheck(ctx)
   if (startup.refuse) {
     if (startup.health) ctx.report(SOURCE, startup.health)
     return
   }
+  if (profile && startup.reply) reportSlackToken(ctx, profile, startup.reply)
   await Promise.allSettled([watch(ctx, signal, startup.health), runSlackHistory(ctx, signal)])
 }
