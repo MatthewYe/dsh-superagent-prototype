@@ -1,30 +1,58 @@
 #!/usr/bin/env python3
-"""Manage a local dsh-superagent service (one DSH profile, default `superagent`) without affecting other tmux sessions.
+"""Operate the Docker-backed dsh-superagent instances and report their readiness.
 
-`status`, `start`, and `restart` exit 0 while the service runs normally; 1 when it is stopped, duplicated, unreachable, or
-reporting a runtime error, which `restart` may fix; 2 when it runs while a component such as a Source reports an error;
-and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they need a person.
+Actions: `start`, `stop`, `restart`, `status`, `logs` and `build`. Each instance
+(`superagent` or `livis`) has its own Compose project, service, volumes and
+published port. The script drives `scripts/docker-instance` for the Compose
+operations, so credentials, one-time state import and the panel URL stay in one
+place.
+
+Exit codes, shared with the host-profile implementation:
+
+  0  the instance runs and every management health entry is ready
+  1  it does not run, does not answer, or a runtime error may be fixed by a restart
+  2  a non-runtime part is broken or required configuration is missing (including
+     an image build failure)
+  3  it runs but waits for setup
+
+`--legacy` dispatches `start`, `stop`, `restart` and `status` to the pre-Docker
+tmux implementation in `scripts/dsh-superagent-legacy`, without touching Docker
+volumes or the Compose projects.
 """
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
-import shlex
-import shutil
-import signal
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ROOT / '.artifacts'
 CONTROL = ARTIFACTS / 'control'
-KEEP_LOGS = 20
+DOCKER_INSTANCE = ROOT / 'scripts' / 'docker-instance'
+BUILD_SCRIPT = ROOT / 'scripts' / 'docker-build'
+LEGACY_SCRIPT = ROOT / 'scripts' / 'dsh-superagent-legacy'
+DOCKER_INSTANCES = ('superagent', 'livis')
+DEFAULT_PORTS = {'superagent': 3082, 'livis': 3083}
+DEFAULT_DSH_VERSION = '0.2.1-rc.3'
+DEFAULT_LIVIS_DIR = '/Users/matthewye/Documents/WorkSpace/dsh-livis'
+PROFILE_PATTERN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*')
+PART_ERROR = 2
+SETUP_WAITS = 3
+
+
+class ConfigError(Exception):
+    """A missing or invalid configuration; the operator must change it (exit 2)."""
+
+
+class RuntimeFailure(Exception):
+    """A runtime failure that a restart may fix (exit 1)."""
 
 
 def control(profile):
@@ -35,47 +63,161 @@ def control(profile):
 
 
 def stopped(profile):
-    """Return whether `profile` was intentionally stopped."""
+    """Return whether `profile` was intentionally stopped through this script."""
     return (control(profile) / 'manually-stopped').exists()
 
 
-def serves(args, profile):
-    """Return whether command-line arguments belong to the main DSH service process for `profile`."""
-    words, matched, value = [], False, False
-    for word in args[1:]:
-        if value:
-            matched, value = matched or word == profile, False
-        elif word == '--profile':
-            value = True
-        elif word == '--profile=' + profile:
-            matched = True
-        elif not word.startswith('-'):
-            words.append(word)
-    return matched and 'plugin' not in words
+def artifacts():
+    """Return the artifacts root used by `scripts/docker-instance`."""
+    return Path(os.environ.get('SUPERAGENT_ARTIFACTS_DIR') or ARTIFACTS)
 
 
-def ps(*options, check=False):
-    """Yield `(pid, comm, args)` tuples from `ps`; arguments are split on whitespace, so paths with spaces become several words and only `--profile` and subcommands are inspected."""
-    result = subprocess.run(['ps', '-ww', *options, '-o', 'pid=,ucomm=,args='], check=check, capture_output=True, text=True)
-    for line in result.stdout.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit():
-            yield int(parts[0]), parts[1], parts[2].split()
+def runtime_dir(profile):
+    """Return the runtime directory that holds the Docker instance's panel URL and image tag."""
+    return artifacts() / 'instances' / profile
 
 
-def running(pid, profile):
-    """Return whether `pid` is currently running the DSH service for `profile` (`ps -p` returns nothing once exited)."""
-    return any(found == pid and name in ('node', 'dsh') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
-
-
-def processes(profile):
-    """Return PIDs of all running DSH service processes for `profile`, including instances started outside this script and the recorded `service.pid` while still running."""
-    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh') and serves(args, profile)]
+def read_text(path):
+    """Read a small runtime file, or return None when it does not exist."""
     try:
-        pid = int((control(profile) / 'service.pid').read_text())
-    except (OSError, ValueError):
-        return found
-    return found + [pid] if pid not in found and running(pid, profile) else found
+        value = path.read_text().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def project(profile):
+    """Return the Compose project name, matching the default in `scripts/docker-instance`."""
+    return os.environ.get('SUPERAGENT_PROJECT') or f'dsh-superagent-{profile}'
+
+
+def docker_bin():
+    """Return the Docker executable, matching the override used by `scripts/docker-instance`."""
+    return os.environ.get('SUPERAGENT_DOCKER_BIN') or 'docker'
+
+
+def run_command(command, *, env=None, capture=False, cwd=None):
+    """Run a command, translating a missing executable into a configuration error."""
+    try:
+        return subprocess.run(
+            command,
+            env=env,
+            cwd=cwd,
+            capture_output=capture,
+            text=capture,
+        )
+    except FileNotFoundError as error:
+        raise ConfigError(f'{command[0]} was not found on PATH.') from error
+
+
+def run_instance(action, profile, *, env=None, capture=False, extra=()):
+    """Run `scripts/docker-instance` for one instance."""
+    if not DOCKER_INSTANCE.is_file():
+        raise ConfigError(f'{DOCKER_INSTANCE} is missing; restore the deployment scripts.')
+    return run_command([str(DOCKER_INSTANCE), action, profile, *extra], env=env, capture=capture)
+
+
+def instance_exit(result):
+    """Map `scripts/docker-instance`'s 0/1/2 contract onto the operator contract."""
+    if result.returncode == 0:
+        return 0
+    if result.returncode == 2:
+        return 2
+    return 1
+
+
+def forward(result):
+    """Forward a captured helper result to stderr, keeping this script's stdout for its own contract."""
+    for stream in ('stdout', 'stderr'):
+        text = getattr(result, stream)
+        if text:
+            print(text, file=sys.stderr, end='' if text.endswith('\n') else '\n')
+
+
+def image_available(image):
+    """Return whether the image tag exists locally."""
+    result = run_command([docker_bin(), 'image', 'inspect', image], capture=True)
+    return result.returncode == 0
+
+
+def derived_image():
+    """Derive the image tag exactly as `scripts/docker-build` does unless the operator overrides it."""
+    override = os.environ.get('SUPERAGENT_IMAGE')
+    if override:
+        return override
+    commit = git_commit(ROOT, 'this checkout')
+    livis_dir = Path(os.environ.get('LIVIS_DIR') or DEFAULT_LIVIS_DIR)
+    livis_commit = git_commit(livis_dir, 'the Livis checkout')
+    version = os.environ.get('DSH_VERSION') or DEFAULT_DSH_VERSION
+    return f'dsh-superagent:{commit}-livis-{livis_commit}-dsh-{version}'
+
+
+def git_commit(directory, label):
+    """Return the 12-character commit that `scripts/docker-build` puts in the image tag."""
+    if not directory.exists():
+        raise ConfigError(
+            f'cannot derive the image tag: {label} at {directory} does not exist. '
+            'Set SUPERAGENT_IMAGE or LIVIS_DIR, or build the image with scripts/docker-build.'
+        )
+    result = run_command(['git', '-C', str(directory), 'rev-parse', '--short=12', 'HEAD'], capture=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip()
+        raise ConfigError(
+            f'cannot derive the image tag: {label} at {directory} is not a readable git checkout'
+            + (f' ({detail})' if detail else '')
+            + '. Set SUPERAGENT_IMAGE or fix the checkout.'
+        )
+    return result.stdout.strip()
+
+
+def build_image(image, *, emit_tag):
+    """Build `image` with `scripts/docker-build`; never touch the previous tag or any volume.
+
+    `scripts/docker-build` streams progress to stderr and prints the finished
+    tag to stdout. Only an explicit `build` puts that tag on this script's
+    stdout; a build triggered by `start` reports it on stderr so stdout keeps a
+    single JSON status object.
+    """
+    if not BUILD_SCRIPT.is_file():
+        raise ConfigError(f'{BUILD_SCRIPT} is missing; restore the deployment scripts.')
+    print(f'dsh-superagent: building image {image} with scripts/docker-build.', file=sys.stderr)
+    env = dict(os.environ)
+    env['SUPERAGENT_IMAGE'] = image
+    try:
+        result = subprocess.run(
+            ['bash', str(BUILD_SCRIPT)], env=env, cwd=str(ROOT),
+            stdout=subprocess.PIPE, text=True,
+        )
+    except FileNotFoundError as error:
+        raise ConfigError('bash was not found on PATH.') from error
+    tag = image
+    if result.stdout and result.stdout.strip():
+        tag = result.stdout.strip().splitlines()[-1]
+    if result.returncode != 0:
+        if result.stdout and result.stdout.strip():
+            print(result.stdout.strip(), file=sys.stderr)
+        raise ConfigError(
+            'the image build failed; the previous image tag and every volume were left untouched.'
+        )
+    if not image_available(image):
+        raise ConfigError(
+            f'scripts/docker-build finished but image {image} is not available locally. '
+            'The previous image tag and every volume were left untouched.'
+        )
+    if emit_tag:
+        print(tag, flush=True)
+    else:
+        print(f'dsh-superagent: built image {tag}.', file=sys.stderr)
+    return tag
+
+
+def ensure_image(force=False, *, emit_tag=False):
+    """Return an available image tag, building it on demand unless `force` rebuilds it."""
+    image = derived_image()
+    if not force and image_available(image):
+        return image
+    build_image(image, emit_tag=emit_tag)
+    return image
 
 
 def state(url):
@@ -89,162 +231,315 @@ def state(url):
         health, setup = value.get('health') or {}, value.get('setup') or {}
         entries = {name: entry if isinstance(entry, dict) else {} for name, entry in health.items()}
         return {'health': {name: entry.get('state') for name, entry in entries.items()},
-                'errors': {name: str(entry.get('detail', '')) for name, entry in entries.items() if entry.get('state') == 'error'},
+                'errors': {name: str(entry.get('detail', '')) for name, entry in entries.items()
+                           if entry.get('state') == 'error'},
                 'setup': setup.get('problem'), 'feishu': setup.get('feishuProblem')}
     except (OSError, ValueError, AttributeError):
         return None
 
 
-PART_ERROR = 2
-SETUP_WAITS = 3
-
-
-def runtime_up(current):
-    """Return whether the runtime is ready or paused awaiting operator action; a component still starting (such as history recovery) does not hold this up."""
-    return current is not None and current['health'].get('runtime') in ('ready', 'paused')
-
-
-def part_errors(current):
-    """Return non-runtime components that are in an error state."""
-    return {name: detail for name, detail in sorted(current['errors'].items()) if name != 'runtime'}
-
-
-def outcome(pids, current):
-    """Compute the CLI exit code from running PIDs and management API state."""
-    if len(pids) != 1 or not runtime_up(current):
+def outcome(current):
+    """Compute the exit code from the management API state of a running container."""
+    if current is None:
+        return 1
+    health, errors = current['health'], current['errors']
+    if not health or health.get('runtime') not in ('ready', 'paused'):
         return 1
     if current['setup']:
         return SETUP_WAITS
-    # A component's lasting error, unlike a Feishu bot check that failed during setup, requires operator action.
-    return PART_ERROR if part_errors(current) else 0
+    if {name: detail for name, detail in errors.items() if name != 'runtime'}:
+        return PART_ERROR
+    if any(value != 'ready' for value in health.values()):
+        return SETUP_WAITS
+    return 0
 
 
-def status(args):
-    pids = processes(args.profile)
-    current = state(args.url) if pids else None
-    print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': args.url,
-                      'manually_stopped': stopped(args.profile), 'health': current and current['health'],
-                      'errors': current and current['errors'], 'setup': current and current['setup'],
-                      'feishu': current and current['feishu']}, ensure_ascii=False, indent=2))
-    return outcome(pids, current)
+def resolve_url(args, profile):
+    """Return the host management-API base URL for the selected instance."""
+    if args.url:
+        return args.url
+    configured = os.environ.get('DSH_SUPERAGENT_URL')
+    if configured:
+        return configured
+    recorded = read_text(runtime_dir(profile) / 'port')
+    if recorded:
+        return f'http://127.0.0.1:{recorded}'
+    port = os.environ.get('SUPERAGENT_PUBLISH_PORT') or DEFAULT_PORTS[profile]
+    return f'http://127.0.0.1:{port}'
 
 
-def stop(args, intentional=True):
-    """Stop the service gracefully, recording a manual stop marker when `intentional` is True."""
-    pids = processes(args.profile)
-    if len(pids) > 1:
-        raise RuntimeError('Multiple dsh-superagent processes found; refusing to choose one.')
-    # Write the stop marker before waiting so monitors respect the intentional stop even if graceful shutdown times out.
+def panel_url(profile):
+    """Return the panel URL `scripts/docker-instance` wrote for the latest boot."""
+    return read_text(runtime_dir(profile) / 'panel-url')
+
+
+def configured_image(profile):
+    """Return the recorded image tag, falling back to the requested tag."""
+    return read_text(runtime_dir(profile) / 'image') or os.environ.get('SUPERAGENT_IMAGE')
+
+
+def print_status(profile, running, current, args):
+    """Print the stable status object and return its exit code."""
+    value = {
+        'instance': profile,
+        'project': project(profile),
+        'container': 'running' if running else 'stopped',
+        'image': configured_image(profile),
+        'url': resolve_url(args, profile),
+        'panel': panel_url(profile),
+        'manually_stopped': stopped(profile),
+        'health': current and current['health'],
+        'errors': current and current['errors'],
+        'setup': current and current['setup'],
+        'feishu': current and current['feishu'],
+    }
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+    return outcome(current) if running else 1
+
+
+def explain(current, code):
+    """Print the operator-facing reasons behind a non-zero exit code to stderr."""
+    if code == 0 or current is None:
+        return
+    if current['setup']:
+        detail = current['setup'].get('detail', '') if isinstance(current['setup'], dict) else current['setup']
+        print('dsh-superagent is waiting for setup: ' + str(detail), file=sys.stderr)
+    if current['feishu']:
+        detail = current['feishu'].get('detail', '') if isinstance(current['feishu'], dict) else current['feishu']
+        print('dsh-superagent runs without Feishu: ' + str(detail), file=sys.stderr)
+    for name, detail in sorted(current['errors'].items()):
+        if name != 'runtime':
+            print(f'{name} reports an error, which a restart does not fix: {detail}', file=sys.stderr)
+    if code == SETUP_WAITS and not current['setup']:
+        unready = ', '.join(f'{name} {value}' for name, value in sorted(current['health'].items())
+                            if value != 'ready')
+        if unready:
+            print('dsh-superagent is running but not ready: ' + unready, file=sys.stderr)
+
+
+def status(profile, args):
+    """Report the selected Docker instance using Compose state plus the management API."""
+    result = run_instance('status', profile, capture=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end='' if result.stderr.endswith('\n') else '\n')
+    if result.returncode == 2:
+        return 2
+    running = result.returncode == 0
+    current = state(resolve_url(args, profile)) if running else None
+    return print_status(profile, running, current, args)
+
+
+def stop(profile, args, *, intentional):
+    """Stop the selected instance through Compose; keep its volumes."""
     if intentional:
-        (control(args.profile) / 'manually-stopped').write_text(time.strftime('%Y-%m-%dT%H:%M:%S%z') + '\n')
-    for pid in pids:
-        os.kill(pid, signal.SIGINT)
-    deadline = time.monotonic() + args.stop_timeout
-    while any(running(pid, args.profile) for pid in pids):
-        if time.monotonic() >= deadline:
-            raise RuntimeError('Graceful stop timed out; no forced kill was sent. Check status.')
-        time.sleep(0.5)
-    (control(args.profile) / 'service.pid').unlink(missing_ok=True)
-    print('dsh-superagent stopped. Automatic recovery is paused until start/restart.' if intentional else 'dsh-superagent stopped.')
+        (control(profile) / 'manually-stopped').write_text(
+            time.strftime('%Y-%m-%dT%H:%M:%S%z') + '\n')
+    result = run_instance('stop', profile, capture=True)
+    forward(result)
+    if result.returncode == 0 and intentional:
+        print('Automatic recovery is paused until start/restart.')
+    return instance_exit(result)
 
 
-def prune_logs(profile):
-    """Retain only the newest `KEEP_LOGS` log files for `profile`."""
-    name = re.compile(re.escape(f'dsh-superagent-{profile}-') + r'\d{8}-\d{6}-\d+\.log')
-    logs = sorted((path for path in ARTIFACTS.iterdir() if name.fullmatch(path.name)), key=lambda path: path.stat().st_mtime)
-    for path in logs[:-KEEP_LOGS]:
-        path.unlink(missing_ok=True)
+def container_running(profile):
+    """Return whether the selected instance's container is running right now."""
+    result = run_instance('status', profile, capture=True)
+    return result.returncode == 0
 
 
-def start(args):
-    session = 'dsh-' + args.profile
-    pids = processes(args.profile)
-    if len(pids) > 1:
-        raise RuntimeError('Multiple dsh-superagent processes found; refusing to start another.')
-    if not pids:
-        dsh = shutil.which('dsh')
-        if not dsh or not shutil.which('tmux'):
-            raise RuntimeError('Both dsh and tmux must be on PATH.')
-        exists = subprocess.run(['tmux', 'has-session', '-t', '=' + session],
-                                capture_output=True).returncode == 0
-        if state(args.url) is not None:
-            raise RuntimeError('An existing orchestrator answers at this URL; refusing duplicate startup.')
-        stamp = time.strftime('%Y%m%d-%H%M%S')
-        log = ARTIFACTS / f'dsh-superagent-{args.profile}-{stamp}-{os.getpid()}.log'
-        log.touch()
-        prune_logs(args.profile)
-        # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
-        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
-                   + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
-        # Reuse an existing tmux session without disturbing other windows.
-        target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
-        pane = subprocess.run(['tmux', *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT), command],
-                              check=True, capture_output=True, text=True).stdout.strip()
-        if pane.isdigit():
-            (control(args.profile) / 'service.pid').write_text(pane + '\n')
-        print('Log: ' + str(log), flush=True)
-    else:
-        (control(args.profile) / 'service.pid').write_text(f'{pids[0]}\n')
-        print(f'dsh-superagent already running (PID {pids[0]}); no duplicate started.', flush=True)
-    (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
+def warn_if_switching(profile, image, previous, was_running):
+    """Warn, without blocking, when a running instance moves to a different image tag."""
+    if not was_running or not previous or previous == image:
+        return
+    print(
+        f'dsh-superagent: warning: switching the running {profile} instance from {previous} to {image}. '
+        'The DSH database migration is one-way; an older image may not be able to read a database '
+        'migrated by a newer one. Back up the state volume before rolling back.',
+        file=sys.stderr,
+    )
+
+
+def wait_for_ready(profile, args, image):
+    """Poll the management API after a boot and return the four-way readiness code."""
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
-        current = state(args.url)
-        if processes(args.profile) and runtime_up(current):
-            code = status(args)
-            if current['setup']:
-                print('dsh-superagent is waiting for setup: ' + str(current['setup'].get('detail', '')))
-                print('Open the URL DSH printed in the log, then the dsh-superagent overview.')
-            if current['feishu']:
-                print('dsh-superagent runs without Feishu: ' + str(current['feishu'].get('detail', '')))
-                print('Fix it on the Feishu card of the Source settings.')
-            for name, detail in part_errors(current).items():
-                print(f'{name} reports an error, which a restart does not fix: {detail}')
-            return code
+        current = state(resolve_url(args, profile))
+        if current is not None:
+            runtime = current['health'].get('runtime')
+            if runtime == 'error':
+                code = print_status(profile, True, current, args)
+                explain(current, code)
+                return 1
+            if runtime in ('ready', 'paused'):
+                code = outcome(current)
+                if code == 0:
+                    print_status(profile, True, current, args)
+                    return 0
+                if current['setup'] or current['errors'] or runtime == 'paused':
+                    print_status(profile, True, current, args)
+                    explain(current, code)
+                    return code
+                if not any(value == 'starting' for value in current['health'].values()):
+                    print_status(profile, True, current, args)
+                    explain(current, code)
+                    return code
         time.sleep(1)
-    status(args)
-    raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
+    current = state(resolve_url(args, profile))
+    code = print_status(profile, True, current, args)
+    explain(current, code)
+    raise RuntimeFailure(
+        'startup health check timed out; inspect it with '
+        f'`scripts/dsh-superagent --profile {profile} logs --tail 200`. '
+        'The container was left running.'
+    )
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'])
-    parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
-                        help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
-    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
-                        help='Health-check URL; override after changing the profile port.')
-    parser.add_argument('--timeout', type=float, default=60, help='Startup timeout in seconds.')
-    parser.add_argument('--stop-timeout', type=float, default=300,
-                        help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
-    parser.add_argument('--respect-stop', action='store_true',
-                        help='For monitoring: never start/restart after an intentional stop.')
-    args = parser.parse_args()
-    if args.timeout <= 0 or args.stop_timeout <= 0:
-        parser.error('--timeout and --stop-timeout must be positive')
-    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
-        parser.error('--profile must be a DSH profile name')
-    os.umask(0o077)
-    with (control(args.profile) / 'operation.lock').open('a') as lock:
+def start(profile, args, *, previous=None, was_running=None):
+    """Build if needed, start the selected instance and wait for readiness."""
+    image = ensure_image()
+    warn_if_switching(profile, image, previous, was_running)
+    env = dict(os.environ)
+    env['SUPERAGENT_IMAGE'] = image
+    result = run_instance('start', profile, env=env, capture=True)
+    forward(result)
+    if result.returncode != 0:
+        return instance_exit(result)
+    (control(profile) / 'manually-stopped').unlink(missing_ok=True)
+    return wait_for_ready(profile, args, image)
+
+
+def logs(profile, args):
+    """Stream the selected service's logs, passing follow/tail through Compose."""
+    extra = []
+    if args.follow:
+        extra.append('--follow')
+    if args.tail is not None:
+        extra.extend(['--tail', str(args.tail)])
+    result = run_instance('logs', profile, extra=extra)
+    return instance_exit(result)
+
+
+def build(args):
+    """Build the shared image explicitly; nothing running or stored is modified."""
+    image = ensure_image(force=True, emit_tag=True)
+    print(f'dsh-superagent: image {image} is ready.', file=sys.stderr)
+    return 0
+
+
+def run_legacy(args):
+    """Replace this process with the preserved pre-Docker implementation."""
+    if args.action in ('logs', 'build'):
+        raise ConfigError(
+            f'`{args.action}` is not supported by the legacy host path; '
+            'use it without --legacy for a Docker instance.'
+        )
+    if not LEGACY_SCRIPT.is_file():
+        raise ConfigError(f'{LEGACY_SCRIPT} is missing; restore the legacy script.')
+    command = [
+        sys.executable, str(LEGACY_SCRIPT), args.action,
+        '--profile', args.profile,
+        '--timeout', str(args.timeout),
+        '--stop-timeout', str(args.stop_timeout),
+    ]
+    if args.url:
+        command.extend(['--url', args.url])
+    if args.respect_stop:
+        command.append('--respect-stop')
+    try:
+        os.execv(sys.executable, command)
+    except OSError as error:
+        raise ConfigError(f'could not start {LEGACY_SCRIPT}: {error}') from error
+
+
+@contextmanager
+def operation_lock(profile):
+    """Refuse concurrent control operations on the same instance."""
+    with (control(profile) / 'operation.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError('Another dsh-superagent control operation is in progress.') from None
+            raise RuntimeFailure('Another dsh-superagent control operation is in progress.') from None
+        yield
+
+
+def parser():
+    """Build the command-line parser."""
+    value = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    value.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'logs', 'build'])
+    value.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
+                       help='Docker instance to operate: superagent (port 3082) or livis (port 3083).')
+    value.add_argument('--url', default=None,
+                       help='Management-API base URL; defaults to the instance port or DSH_SUPERAGENT_URL.')
+    value.add_argument('--timeout', type=float, default=60, help='Startup readiness timeout in seconds.')
+    value.add_argument('--stop-timeout', type=float, default=300,
+                       help='Compose shutdown timeout in seconds.')
+    value.add_argument('--respect-stop', action='store_true',
+                       help='For monitoring: never start/restart after an intentional stop.')
+    value.add_argument('--legacy', action='store_true',
+                       help='Use the pre-Docker tmux implementation (start/stop/restart/status only).')
+    value.add_argument('--follow', '-f', action='store_true',
+                       help='With logs: follow new log lines.')
+    value.add_argument('--tail', '-n', type=int, default=None, metavar='N',
+                       help='With logs: show only the last N lines.')
+    return value
+
+
+def main():
+    """Dispatch one operator action."""
+    args = parser().parse_args()
+    if args.timeout <= 0 or args.stop_timeout <= 0:
+        raise ConfigError('--timeout and --stop-timeout must be positive.')
+    if args.tail is not None and args.tail < 0:
+        raise ConfigError('--tail must be zero or a positive integer.')
+    if not PROFILE_PATTERN.fullmatch(args.profile):
+        raise ConfigError('--profile must be a DSH profile name.')
+
+    if args.legacy:
+        return run_legacy(args)
+    if args.profile not in DOCKER_INSTANCES:
+        raise ConfigError(
+            f'--profile {args.profile} is not a Docker instance; only '
+            + ', '.join(DOCKER_INSTANCES)
+            + ' are managed by Docker. Use --legacy to run a host profile.'
+        )
+
+    if args.action == 'logs':
+        return logs(args.profile, args)
+    if args.action == 'build':
+        return build(args)
+
+    with operation_lock(args.profile):
         if args.respect_stop and args.action in ('start', 'restart') and stopped(args.profile):
             print('Intentional stop is active; automatic recovery skipped.')
             return 0
         if args.action == 'status':
-            return status(args)
-        if args.action in ('stop', 'restart'):
-            # Only a stop keeps automatic recovery off; a restart whose stop timed out leaves it on.
-            stop(args, intentional=args.action == 'stop')
-        if args.action in ('start', 'restart'):
-            return start(args)
+            return status(args.profile, args)
+        if args.action == 'stop':
+            return stop(args.profile, args, intentional=True)
+        if args.action == 'restart':
+            previous = configured_image(args.profile)
+            was_running = bool(previous) and container_running(args.profile)
+            code = stop(args.profile, args, intentional=False)
+            if code != 0:
+                return code
+            return start(args.profile, args, previous=previous, was_running=was_running)
+        previous = configured_image(args.profile)
+        was_running = bool(previous) and container_running(args.profile)
+        return start(args.profile, args, previous=previous, was_running=was_running)
     return 0
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
-        print(str(error), file=sys.stderr)
+    except ConfigError as error:
+        print(f'dsh-superagent: {error}', file=sys.stderr)
+        sys.exit(2)
+    except (OSError, RuntimeFailure) as error:
+        print(f'dsh-superagent: {error}', file=sys.stderr)
         sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
