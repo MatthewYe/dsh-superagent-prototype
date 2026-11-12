@@ -1,20 +1,55 @@
 #!/usr/bin/env bash
-# Build the product image from this working tree (ticket #2).
+# Build the product image from this working tree and the Livis plugin checkout
+# (tickets #2 and #4).
 #
-# The tag encodes the product commit and the pinned DSH CLI version; ticket #3
-# appends the Livis plugin commit to the same convention.
+# The tag encodes the product commit, the Livis plugin commit and the pinned DSH
+# CLI version, so a plugin change produces a different image instead of a
+# silently vendored copy. The Livis checkout is passed as the named BuildKit
+# context `livis`; it is not copied into this repository.
+#
+# Requires Docker with buildx (Docker Desktop/OrbStack provide it). On a host
+# where the sandbox blocks ~/.docker, export BUILDX_CONFIG to a writable
+# directory before running this script.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 dsh_version=${DSH_VERSION:-0.2.1-rc.3}
 commit=$(git -C "$root" rev-parse --short=12 HEAD)
-tag="dsh-superagent:${commit}-dsh-${dsh_version}"
+
+livis_dir=${LIVIS_DIR:-/Users/matthewye/Documents/WorkSpace/dsh-livis}
+if [ ! -d "$livis_dir" ]; then
+  echo "docker-build: Livis plugin checkout not found at $livis_dir; set LIVIS_DIR to the dsh-livis checkout" >&2
+  exit 1
+fi
+livis_dir=$(cd -- "$livis_dir" && pwd)
+if [ ! -f "$livis_dir/packages/dsh-livis-source/package.json" ]; then
+  echo "docker-build: $livis_dir is not a dsh-livis checkout: packages/dsh-livis-source/package.json is missing" >&2
+  exit 1
+fi
+if [ ! -f "$livis_dir/pnpm-lock.yaml" ]; then
+  echo "docker-build: $livis_dir has no pnpm-lock.yaml; the image install needs it for --frozen-lockfile" >&2
+  exit 1
+fi
+livis_commit=$(git -C "$livis_dir" rev-parse --short=12 HEAD 2>/dev/null) || {
+  echo "docker-build: $livis_dir is not a git checkout; the plugin commit must be recorded in the tag" >&2
+  exit 1
+}
+if [ -n "$(git -C "$livis_dir" status --porcelain 2>/dev/null)" ]; then
+  echo "docker-build: $livis_dir has uncommitted changes; commit or stash them so the tag's livis commit describes the plugin that is built" >&2
+  exit 1
+fi
+
+tag="dsh-superagent:${commit}-livis-${livis_commit}-dsh-${dsh_version}"
 image=${SUPERAGENT_IMAGE:-$tag}
 
-docker build \
+echo "docker-build: product $commit, livis $livis_commit, DSH $dsh_version" >&2
+docker buildx build \
+  --load \
   --build-arg "DSH_VERSION=${dsh_version}" \
   --build-arg "PRODUCT_COMMIT=${commit}" \
+  --build-arg "LIVIS_COMMIT=${livis_commit}" \
   --build-arg "IMAGE_TAG=${image}" \
+  --build-context "livis=${livis_dir}" \
   --tag "$image" \
   --file "$root/Dockerfile" \
   "$root"

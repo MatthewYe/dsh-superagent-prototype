@@ -1,21 +1,36 @@
 #!/bin/bash
-# Root entrypoint for the DSH Superagent container (ticket #2).
+# Root entrypoint for the DSH Superagent container (tickets #2 and #4).
 #
-# It seeds a writable DSH home from the baked template on first start, creates and
-# owns the data directories, starts the loopback relay as the operator identity,
-# and execs DSH as uid 501 / gid 20. DSH itself never binds a wildcard address.
+# It seeds a writable DSH home from the baked profile template on first start,
+# creates and owns the data directories, starts the loopback relay as the
+# operator identity, and execs DSH as uid 501 / gid 20. DSH itself never binds a
+# wildcard address.
+#
+# The profile is selected with DSH_PROFILE (compose sets it per service); it
+# selects the template, the seeded profile and the plugin link set. The port
+# pair is selected with SUPERAGENT_RELAY_PORT / SUPERAGENT_TARGET_PORT.
 set -euo pipefail
 
+readonly PROFILE=${DSH_PROFILE:-superagent}
 readonly HOME_DIR=${DSH_HOME:-/data/dsh}
 readonly STATE_DIR=${SUPERAGENT_STATE_DIR:-/Users/matthewye/.dsh/state/superagent}
 readonly TEMPLATE=${SUPERAGENT_TEMPLATE:-/opt/superagent-template}
 readonly PRODUCT=${SUPERAGENT_PRODUCT:-/opt/dsh-superagent}
+readonly LIVIS_PRODUCT=${SUPERAGENT_LIVIS_PRODUCT:-/opt/dsh-livis/packages/dsh-livis-source}
 readonly RELAY=${SUPERAGENT_RELAY:-/usr/local/lib/superagent/relay.mjs}
 readonly OPERATOR_UID=501
 readonly OPERATOR_GID=20
 
+case "$PROFILE" in
+  superagent|livis) ;;
+  *)
+    echo "superagent-entrypoint: unknown DSH_PROFILE '$PROFILE' (expected superagent or livis)" >&2
+    exit 2
+    ;;
+esac
+
 if [ "$#" -eq 0 ]; then
-  set -- dsh --profile superagent --no-open
+  set -- dsh --profile "$PROFILE" --no-open
 fi
 
 mkdir -p "$HOME_DIR" "$STATE_DIR"
@@ -27,7 +42,7 @@ chown "$OPERATOR_UID:$OPERATOR_GID" "$(dirname "$STATE_DIR")"
 
 # First start: the home on the volume is empty, so seed it from the baked profile.
 # A later start keeps everything the instance wrote, including its settings.
-if [ ! -f "$HOME_DIR/profiles/superagent/package.json" ]; then
+if [ ! -f "$HOME_DIR/profiles/$PROFILE/package.json" ]; then
   cp -a "$TEMPLATE"/. "$HOME_DIR"/
 fi
 
@@ -41,9 +56,19 @@ if [ -f "${SUPERAGENT_CREDENTIALS_SOURCE:-/run/superagent/credentials.yaml}" ] \
   echo "superagent-entrypoint: imported DSH credentials from the staging mount" >&2
 fi
 
-# The template's plugin link was baked at a different depth; keep it absolute.
-mkdir -p "$HOME_DIR/profiles/superagent/node_modules"
-ln -sfn "$PRODUCT" "$HOME_DIR/profiles/superagent/node_modules/dsh-superagent"
+# The template's plugin links were baked at a different depth; keep them absolute.
+# Both profiles install the product as a profile layer; livis additionally links
+# its SourceKind plugin (declared without a `dsh.bundle`, so it is inserted by the
+# profile patch instead of being a bundle).
+if [ "$PROFILE" = livis ] && [ ! -f "$LIVIS_PRODUCT/package.json" ]; then
+  echo "superagent-entrypoint: livis profile selected but $LIVIS_PRODUCT is missing" >&2
+  exit 2
+fi
+mkdir -p "$HOME_DIR/profiles/$PROFILE/node_modules"
+ln -sfn "$PRODUCT" "$HOME_DIR/profiles/$PROFILE/node_modules/dsh-superagent"
+if [ "$PROFILE" = livis ]; then
+  ln -sfn "$LIVIS_PRODUCT" "$HOME_DIR/profiles/$PROFILE/node_modules/dsh-livis-source"
+fi
 
 chown -R "$OPERATOR_UID:$OPERATOR_GID" "$HOME_DIR" "$STATE_DIR"
 chmod 0700 "$STATE_DIR"
@@ -58,7 +83,7 @@ as_user() {
 # loopback bind. It runs as the operator identity, not as root.
 as_user node "$RELAY" &
 relay_pid=$!
-echo "superagent-entrypoint: relay pid $relay_pid on ${SUPERAGENT_RELAY_HOST:-0.0.0.0}:${SUPERAGENT_RELAY_PORT:-13082}" >&2
+echo "superagent-entrypoint: profile $PROFILE, relay pid $relay_pid on ${SUPERAGENT_RELAY_HOST:-0.0.0.0}:${SUPERAGENT_RELAY_PORT:-13082}" >&2
 
 # If the entrypoint is signalled before DSH starts, do not leave the relay behind.
 trap 'kill "$relay_pid" 2>/dev/null || true' TERM INT
