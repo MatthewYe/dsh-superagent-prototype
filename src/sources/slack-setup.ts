@@ -58,7 +58,7 @@ export async function resolveSlackProfile(machine: Machine, slack: unknown, prob
   const identity = parsed(IdentitySchema, output)
   if (!identity) throw new SetupError('slackBridgeFailed', { output })
   return { cli, teamId: identity.team_id, team: identity.team, botId: identity.bot_id, userId: identity.user_id,
-    name: identity.user ?? identity.bot_id, url: identity.url }
+    name: identity.user || identity.bot_id, url: identity.url }
 }
 
 /** The Slack profile resolved into the deployment's per-source slots, if the Slack probe succeeded. */
