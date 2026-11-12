@@ -5,9 +5,10 @@ import type { Deployment } from '../deployment.ts'
 import { sourceContext } from './host.ts'
 import { resolveSlackProfile, slackProfile, type SlackProfile } from './slack-setup.ts'
 import { sendSlack, slackLink } from './slack-channel.ts'
+import { slackThreadContext } from './slack-read.ts'
 import { refreshConversationNames } from './slack-history.ts'
 import { SlackPolicySchema, syncSlackRoster } from './slack-policy.ts'
-import { slackScope } from './slack-trigger.ts'
+import { slackRepliesTo, slackScope, slackTerms } from './slack-trigger.ts'
 import { runSlack } from './slack-loop.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -105,6 +106,9 @@ export const slackKind: SourceKind<SlackConfig> = {
       run: syncSlackRoster,
     },
   },
+  threadContext: slackThreadContext,
+  find: query => ({ threads: [], terms: slackTerms(query) }),
+  repliesTo: slackRepliesTo,
 }
 
 /** The Slack profile resolved into the deployment's per-source slots, if the Slack probe succeeded. */
