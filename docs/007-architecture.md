@@ -455,7 +455,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 | `tests/slack-setup.spec.ts` | The Slack config schema and the `slack-bridge` probe against a fake executable: a missing bridge, unreadable answers, rejected tokens, and the resolved profile |
 | `tests/slack-bridge.spec.ts` | The `slack-bridge` commands offline: argv and usage, the Web API answers and 429 waits against a loopback stand-in, config precedence, the auth files and their modes, and Socket Mode framing, acks and reconnects |
-| `tests/slack-bridge-build.spec.ts` | The built `slack-bridge` executable: its shebang and mode, one `--version` run, and that no other entry imports the Slack SDKs |
+| `tests/slack-bridge-build.spec.ts` | The built Slack entries: the `slack-watch` Source export, the `slack-bridge` executable's shebang and mode, one `--version` run, and that no other entry imports the Slack SDKs |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
