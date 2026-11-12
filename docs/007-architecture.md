@@ -618,7 +618,7 @@ The product is one image built at a repository commit with a pinned DeepSeek Har
 
 The container is the DeepSeek Harness isolation boundary: upgrading DeepSeek Harness elsewhere on the host cannot change a running instance, and upgrading an instance is an explicit new image tag. [006 Deployment](006-deployment.md) has the commands; the decision, its rejected alternatives and its revisit conditions are in `docs/adr/0001-docker-deployment.md`.
 
-Credentials, the second `livis` instance and the Compose-driving operator script are not part of the Docker skeleton yet. The opt-in Docker test covers the image, relay, panel, management API, healthcheck, restart persistence and teardown.
+The credential path, the second `livis` instance and the Compose-driving `scripts/dsh-superagent` are part of the Docker path. The image is operator-bound through the `OPERATOR_HOME` / `OPERATOR_UID` / `OPERATOR_GID` build inputs; [006 Deployment](006-deployment.md) documents their neutral defaults and why each operator builds their own image. The opt-in Docker tests cover the image, relay, panel, management API, healthcheck, restart persistence, teardown, the credential plumbing, the one-time state import, and the `livis` instance with its plugin.
 
 ## Reviewing a change against real data
 
