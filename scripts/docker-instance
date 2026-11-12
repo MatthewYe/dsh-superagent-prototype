@@ -80,12 +80,30 @@ home_volume=${project}_${default_home_suffix}
 security_bin=${SUPERAGENT_SECURITY_BIN:-security}
 docker_bin=${SUPERAGENT_DOCKER_BIN:-docker}
 op_bin=${SUPERAGENT_OP_BIN:-op}
+pgrep_bin=${SUPERAGENT_PGREP_BIN:-pgrep}
 validated_login=''
 
 # The livis profile signs in through the DSH account credential record; only the
 # superagent profile needs DEEPSEEK_API_KEY at start.
 requires_model_key() {
   [ "$profile" != livis ]
+}
+
+# The host livis instance and the container share one rotating Livis refresh
+# token. Starting the container from the live state directory while the host
+# process still runs lets both refresh the same token, and one of them is
+# invalidated. Refuse that case unless the operator overrides it deliberately;
+# the opt-in e2e uses a sanitised state copy under a scratch directory.
+refuse_live_token_owner() {
+  [ "$profile" = livis ] || return 0
+  [ "${SUPERAGENT_ALLOW_LIVE_LIVIS:-0}" = "1" ] && return 0
+  [ "${state_dir%/}" = "${HOME%/}/.dsh/state/livis" ] || return 0
+  command -v "$pgrep_bin" >/dev/null 2>&1 || return 0
+  local pids
+  pids=$("$pgrep_bin" -f -- '--profile livis' 2>/dev/null | tr '\n' ' ' || true)
+  if [ -n "${pids// /}" ]; then
+    config_error "the host livis instance is running (pid $pids); stop it before starting the container, so the rotating Livis refresh token has exactly one owner. To override deliberately, set SUPERAGENT_ALLOW_LIVE_LIVIS=1."
+  fi
 }
 
 usage() {
@@ -365,6 +383,7 @@ require_model_key() {
 }
 
 prepare() {
+  refuse_live_token_owner
   require_image
   if ! requires_model_key && [ ! -f "$dsh_home/.credentials.yaml" ]; then
     config_error "the livis instance needs the host DSH credential store at $dsh_home/.credentials.yaml (deepseek-account). Sign in on the host first, or set SUPERAGENT_DSH_HOME."

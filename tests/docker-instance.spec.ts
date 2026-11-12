@@ -410,4 +410,25 @@ describe('scripts/docker-instance', () => {
     expect(result.stderr).toContain('livis instance needs the host DSH credential store')
     expect(existsSync(join(h.artifacts, 'instances', 'livis', 'hosts.yml'))).toBe(false)
   }, 20_000)
+
+  it('refuses to start livis from the live state directory while the host livis process runs', () => {
+    const h = harness()
+    const pgrep = join(h.root, 'bin', 'pgrep')
+    executable(pgrep, 'printf "%s\\n" 4242')
+    const liveState = join(h.env.HOME!, '.dsh', 'state', 'livis')
+    mkdirSync(liveState, { recursive: true })
+    const env: Record<string, string | undefined> = {
+      ...h.env,
+      SUPERAGENT_INSTANCE: 'livis',
+      SUPERAGENT_PROJECT: 'dsh-livis',
+      SUPERAGENT_PUBLISH_PORT: '4083',
+      SUPERAGENT_STATE_DIR: liveState,
+      SUPERAGENT_PGREP_BIN: pgrep,
+    }
+    const result = run(h, 'prepare', env)
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('the host livis instance is running')
+    expect(result.stderr).toContain('exactly one owner')
+    expect(existsSync(join(h.artifacts, 'instances', 'livis', 'hosts.yml'))).toBe(false)
+  }, 20_000)
 })
