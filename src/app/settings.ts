@@ -241,7 +241,8 @@ export class Settings {
       if (JSON.stringify(part) !== JSON.stringify(policy.sources[id])) {
         await this.save('policy', { ...policy, sources: { ...policy.sources, [id]: part } }, revision, 'sync')
       }
-      health.set({ state: 'ready', detail: `${part.allowed.length} allowed`, at: now() })
+      const detail = sources.kind(id)?.policy?.sync?.detail
+      health.set({ state: 'ready', detail: detail ? detail(part) : `${part.allowed.length} allowed`, at: now() })
       this.retrySync(id, false)
       return part
     } catch (error) {

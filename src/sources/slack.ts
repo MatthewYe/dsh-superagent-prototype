@@ -6,6 +6,8 @@ import { sourceContext } from './host.ts'
 import { resolveSlackProfile, slackProfile, type SlackProfile } from './slack-setup.ts'
 import { sendSlack, slackLink } from './slack-channel.ts'
 import { slackThreadContext } from './slack-read.ts'
+import { refreshConversationNames } from './slack-history.ts'
+import { SlackPolicySchema, syncSlackRoster } from './slack-policy.ts'
 import { slackRepliesTo, slackScope, slackTerms } from './slack-trigger.ts'
 import { runSlack } from './slack-loop.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -59,10 +61,50 @@ export const slackKind: SourceKind<SlackConfig> = {
     { key: 'backfillDays', type: 'number', label: { zh: '补收天数', en: 'Days of backfill' }, min: 1, max: 14, advanced: true },
   ],
   health: ['slack', 'history:slack'],
+  refreshLabels: (host, signal) => refreshConversationNames(sourceContext(host, slackKind), signal),
   scope: ({ meta }, config) => slackScope(meta, config),
   channel: {
     allowed: (address, config) => slackScope({ conversation: address.conversation ?? '', direct: address.direct === 'true' }, config).listened,
     send: sendSlack, words: 100, link: slackLink,
+  },
+  policy: {
+    unnamed: { person: { zh: 'Slack 用户', en: 'Slack user' }, bot: { zh: 'Slack 机器人', en: 'Slack bot' } },
+    schema: SlackPolicySchema,
+    fields: [
+      { key: 'allowed', type: 'rows', label: { zh: '能发起工作的 Slack 用户', en: 'Slack users who may originate work' },
+        columns: [{ key: 'id', type: 'text', label: { zh: '用户 ID', en: 'User ID' }, pattern: '[UW][A-Z0-9]{5,}' },
+          { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
+      { key: 'syncConversation', type: 'text', pattern: '[CG][A-Z0-9]{5,}', label: { zh: '同步来源会话', en: 'Sync conversation' },
+        choose: { zh: '不同步', en: 'Do not sync' },
+        hint: { zh: '同步时，名单变成这个公开会话的成员：新成员加入，离开的人移除，名字取 Slack 的显示名。启动时和点同步时进行。',
+          en: 'Syncing makes the list the members of this public conversation: new members join, people who left are removed, and names follow Slack. It runs at startup and on Sync.' } },
+      { key: 'bots', type: 'rows', label: { zh: '消息可以成为候选的机器人', en: 'Bots whose messages may become candidates' },
+        hint: { zh: '名单里的机器人在接收的会话里发的消息成为推断的候选，交给评估；它们不能发起明确的请求，也不能停止工单。',
+          en: 'Messages of a bot on this list, in conversations the Source receives, become inferred candidates for an assessment; they never make an explicit request or stop a ticket.' },
+        columns: [{ key: 'id', type: 'text', label: { zh: '用户 ID', en: 'User ID' }, pattern: '[UW][A-Z0-9]{5,}' },
+          { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
+    ],
+    explicit: { zh: '名单内的人 @ 机器人或私聊机器人，总是明确的请求，不需要配置。',
+      en: 'Someone on the list who mentions the bot or messages it directly always makes an explicit request; that needs no setting.' },
+    rows(stored) {
+      const config = SlackConfigSchema.parse(stored)
+      const mentions = { zh: '仅 @', en: '@ only' }
+      return [
+        ...config.chats.map(chat => ({ id: chat.conversationId, label: chat.name || chat.conversationId,
+          note: chat.listen === 'all' ? { zh: '全部消息', en: 'All' } : mentions,
+          cells: { listedUnaddressed: chat.listen === 'all', unlistedAddressed: true, unlistedUnaddressed: chat.listen === 'all' } })),
+        { id: 'other', label: { zh: '其他会话', en: 'Other conversations' }, note: config.otherChats === 'mentions' ? mentions : { zh: '不接收', en: 'Not received' },
+          cells: { listedUnaddressed: false, unlistedAddressed: config.otherChats === 'mentions', unlistedUnaddressed: false } },
+        { id: 'direct', label: { zh: '私聊', en: 'Direct messages' }, note: config.directMessages ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
+          cells: { listedUnaddressed: false, unlistedAddressed: config.directMessages, unlistedUnaddressed: false } },
+      ]
+    },
+    sync: {
+      label: { zh: '立即同步', en: 'Sync now' },
+      ready: part => !!part.syncConversation,
+      detail: part => `Synced ${part.allowed.length} people`,
+      run: syncSlackRoster,
+    },
   },
   threadContext: slackThreadContext,
   find: query => ({ threads: [], terms: slackTerms(query) }),

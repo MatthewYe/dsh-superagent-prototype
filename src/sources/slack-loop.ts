@@ -1,8 +1,10 @@
 /** Slack socket loop: run the bridge, translate admitted events, and report health. */
 import { z } from 'zod'
 import type { SetupProblem } from '../setup.ts'
+import { KV } from '../kv.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { ConsumerFatal, supervise, type Consumer } from './loop.ts'
+import { runSlackHistory } from './slack-history.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
 import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
 import type { SlackConfig } from './slack.ts'
@@ -73,7 +75,13 @@ export async function handleFrame(ctx: SourceContext, frame: unknown, config: Sl
   const trigger = slackTrigger(event, { botId: profile.botId, userId: profile.userId },
     { teamId: profile.teamId, url: profile.url })
   if (!trigger) return
-  if (!slackAdmitted(slackScope(trigger.meta, config), trigger.addressed)) return
+  const scope = slackScope(trigger.meta, config)
+  if (!slackAdmitted(scope, trigger.addressed)) return
+  // Live traffic also tells the history pass which conversations the bot has already joined.
+  const conversation = String(trigger.meta.conversation)
+  const direct = trigger.meta.direct === true
+  const known = ctx.state.get(KV.slack.conversations) ?? {}
+  if (known[conversation] !== direct) ctx.state.set(KV.slack.conversations, { ...known, [conversation]: direct })
   await ctx.receive(trigger)
 }
 
@@ -106,7 +114,7 @@ export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<vo
   await supervise(ctx, consumer, signal)
 }
 
-/** The Slack Source runs its socket loop; history backfill arrives in a later ticket. */
+/** The Slack Source runs its socket loop and its history, join, and name pass together. */
 export const runSlack = async (ctx: SourceContext, signal: AbortSignal): Promise<void> => {
-  await Promise.allSettled([watch(ctx, signal)])
+  await Promise.allSettled([watch, runSlackHistory].map(loop => loop(ctx, signal)))
 }

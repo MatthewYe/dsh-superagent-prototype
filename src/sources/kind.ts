@@ -37,7 +37,8 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
   /** Receiving scopes of the Policy's admission table under `config` (matching `scope().row`); kinds without `rows` use the table's defaults. */
   rows?(config: Record<string, unknown>): AdmissionRowView[]
   /** Optional external roster sync (such as chat members); `ready` reports whether `part` names a target to refresh from. */
-  sync?: { label: Localized; ready(part: P): boolean; run(host: SourceHost, part: P, signal: AbortSignal): Promise<P> }
+  sync?: { label: Localized; ready(part: P): boolean; detail?(part: P): string;
+    run(host: SourceHost, part: P, signal: AbortSignal): Promise<P> }
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
