@@ -119,7 +119,12 @@ function listeners(): string[] {
     for (const line of table.split('\n').slice(1)) {
       const columns = line.trim().split(/\s+/)
       // st === 0A is TCP_LISTEN.
-      if (columns[3] === '0A') found.push(columns[1]!)
+      if (columns[3] !== '0A') continue
+      // Docker's embedded DNS resolver listens on 127.0.0.11:<random> in every
+      // container network namespace (0B00007F is 127.0.0.11 little-endian). That is
+      // Docker plumbing, not a product bind, so it is not part of the contract.
+      if (columns[1]!.startsWith('0B00007F:')) continue
+      found.push(columns[1]!)
     }
   }
   return found.sort()
