@@ -51,7 +51,7 @@ export async function resolveSlackProfile(machine: Machine, slack: unknown, prob
   catch (error) { throw new SetupError('slackBridgeMissing', { output: reason(error) }) }
   let output: string
   try { output = await probe([cli, 'api', 'auth.test']) }
-  catch (error) { throw new SetupError('slackBridgeMissing', { output: reason(error) }) }
+  catch (error) { throw new SetupError('slackBridgeFailed', { output: reason(error) }) }
   const response = parsed(ResponseSchema, output)
   if (!response) throw new SetupError('slackBridgeFailed', { output })
   if (!response.ok) throw new SetupError('slackAuthFailed', { error: response.error ?? 'unknown_error' })

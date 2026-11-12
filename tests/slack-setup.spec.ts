@@ -84,6 +84,14 @@ it('reports an answer it cannot read as one typed problem', async () => {
   await expect(resolveSlackProfile(testMachine(), { cli }, execute, '')).rejects.toMatchObject({ code: 'slackBridgeFailed' })
 })
 
+it('reports a bridge that ran but could not reach Slack as one typed problem', async () => {
+  const cli = bridge(`if [ "$1" = "--version" ]; then echo 0.1.0; exit 0; fi
+if [ "$1" = "api" ] && [ "$2" = "auth.test" ]; then echo 'connect ETIMEDOUT' >&2; exit 1; fi
+exit 2`)
+  await expect(resolveSlackProfile(testMachine(), { cli }, execute, '')).rejects.toMatchObject({ code: 'slackBridgeFailed',
+    values: { output: expect.stringContaining('connect ETIMEDOUT') } })
+})
+
 it('reports a token Slack rejects with Slack\'s error', async () => {
   const cli = answer({ ok: false, error: 'invalid_auth' })
   await expect(resolveSlackProfile(testMachine(), { cli }, execute, '')).rejects.toMatchObject({ code: 'slackAuthFailed',
