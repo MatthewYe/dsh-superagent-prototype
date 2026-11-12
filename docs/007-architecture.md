@@ -608,6 +608,14 @@ Every plugin configuration key except `stateDir` is volatile. The panel's Deploy
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 
+## Deployment
+
+The product is one image built at a repository commit with a pinned DeepSeek Harness version. Each instance runs as one container from that image, with its own DSH home and state volumes, its own profile and its own loopback-published port. DeepSeek Harness keeps binding `127.0.0.1:3082` inside the container; an in-container relay exposes the panel and management API through a loopback-published port without changing the product's loopback-only `Host` and `Origin` checks. One container owns one state directory, because the orchestrator holds its lock and the database has one writer.
+
+The container is the DeepSeek Harness isolation boundary: upgrading DeepSeek Harness elsewhere on the host cannot change a running instance, and upgrading an instance is an explicit new image tag. [006 Deployment](006-deployment.md) has the commands; the decision, its rejected alternatives and its revisit conditions are in `docs/adr/0001-docker-deployment.md`.
+
+Credentials, the second `livis` instance and the Compose-driving operator script are not part of the Docker skeleton yet. The opt-in Docker test covers the image, relay, panel, management API, healthcheck, restart persistence and teardown.
+
 ## Reviewing a change against real data
 
 Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
@@ -615,4 +623,3 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 ## Open questions
 
 - Trust: which Trigger fields are trusted, such as the Source's actor and Thread membership, and which are not, such as the body and quotes.
-- Deployment isolation: the agent's profile on its own pinned DeepSeek Harness installation, so upgrading DeepSeek Harness elsewhere does not break it.
