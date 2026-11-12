@@ -48,7 +48,7 @@ Recovery is per conversation, from a cursor in `KV.slack.history`, with five sec
 
 `chat.postMessage` with `thread_ts` equal to the Trigger's `thread_ts`, or its `ts` for a top-level message, so every reply lands in a thread and a DM answer stays under its DM. Text is plain mrkdwn, at most 100 words, rejected with the standard rewrite error rather than split. There is no Block Kit, no `chat.update`, and no streaming.
 
-Delivery is at-least-once. `client_msg_id` is a diagnostic hint, not a deduplication guarantee, and one send is in flight globally. Deep links are built from the workspace URL returned by `auth.test`.
+Delivery is at-least-once. No `client_msg_id` is sent: Slack requires a UUID and documents no deduplication, so the receipt id would be only a label. One send is in flight globally. Deep links are built from the workspace URL returned by `auth.test`.
 
 ### Identities and Policy
 
@@ -76,7 +76,7 @@ Images and files are v1.1. Block Kit, streaming and progress messages, reactions
 - **Recovery is bounded, not guaranteed.** Socket Mode may lose events while no socket is open, and the backfill window is a ceiling of fourteen days. A longer outage is recovered only as far as the ceiling allows, and a gap inside the window is recovered through history rather than through replay.
 - **Replies may duplicate once.** A crash between Slack accepting a message and the Outbox settling the receipt sends the reply again on restart. This is accepted; reading the thread back before every retry is not.
 - **One active chat Source at a time is the working assumption.** Slack and Feishu may both be configured, but the design does not assume they are both enabled, and running two chat Sources at once is untested. Prompts, health, and the admission view assume one place a person talks to the agent.
-- **Phase 0 changes shared behaviour.** Renaming the Feishu health entry and replacing the fixed setup tables touches running installations. The existing Feishu tests, unchanged, are the guard.
+- **Phase 0 changes shared behaviour.** Renaming the Feishu health entry and replacing the fixed setup tables touches running installations. The Feishu tests remain the guard, but their fixtures and payloads need mechanical edits for the per-kind profile.
 - **Secrets live in one more place.** The token file is outside the settings database and the repository, but it is a file on the operator's machine that must be protected and backed up deliberately.
 
 ### Debt this creates

@@ -86,7 +86,7 @@ A Thread is identified by `thread_ts`: absent means a top-level message, equal t
 | `chat.postMessage` runs on the special tier, roughly one message per channel per second ([Rate limits](https://docs.slack.dev/apis/web-api/rate-limits)) | one send at a time globally, as the Outbox already does |
 | `conversations.history`, `conversations.replies`, and `conversations.members` are tier 3 or 4 (50+ or 100+ per minute) | backfill pages sequentially with a small page size |
 | HTTP 429 carries `Retry-After` | the bridge waits for it, bounded, and the Source retries on error only |
-| Slack provides no server-side idempotency key; `client_msg_id` is optional | outbound delivery is at-least-once (section 10.4) |
+| Slack provides no server-side idempotency key | outbound delivery is at-least-once (section 10.4) |
 | `chat.update` only updates the bot's own messages and rejects `text` over 4,000 characters with `msg_too_long` | not used in v1 |
 
 ### 2.6 Identity
@@ -119,10 +119,10 @@ The Feishu Source splits into six modules plus a plugin entry. The Slack Source 
 | Path | Responsibility | Key exports |
 | --- | --- | --- |
 | `src/sources/slack.ts` | Source kind, configuration schema, fields, scope, channel wiring, policy, environment, plugin entry. Imports the other modules and assembles them. | `SlackConfigSchema`, `SlackConfig`, `slackKind`, `slackSettings(sources)`, `name`, `inject`, `apply` |
-| `src/sources/slack-trigger.ts` | Event envelope validation, translation to a Trigger, deterministic ids, mrkdwn-to-text, senders, subtypes. | `SOURCE`, `SlackEventSchema`, `slackChannel`, `slackThreadId`, `slackTriggerId`, `slackTrigger`, `slackRef`, `slackParent`, `mrkdwnText` |
+| `src/sources/slack-trigger.ts` | Event envelope validation, translation to a Trigger, deterministic ids, mrkdwn-to-text, senders, subtypes. | `SOURCE`, `SlackEventSchema`, `slackChannel`, `slackThreadId`, `slackTriggerId`, `slackTrigger`, `SlackRef`, `slackRef`, `slackParent`, `mrkdwnText` |
 | `src/sources/slack-loop.ts` | The Socket Mode stream, readiness, restart, and the per-conversation backfill loop; conversation labels. | `runSlack`, `watch`, `backfillLoop`, `backfillConversation`, `refreshConversationNames`, `available` |
 | `src/sources/slack-channel.ts` | Outbound replies through the bridge, error mapping, and deep links. | `sendSlack`, `slackLink`, `slackGone` |
-| `src/sources/slack-read.ts` | Thread context reads and the `slack/<trigger-id>/…` resources. | `SlackRef`, `slackRef`, `slackThreadContext`, `slackRead`, `slackReferences` |
+| `src/sources/slack-read.ts` | Thread context reads and the `slack/<trigger-id>/…` resources. | `slackThreadContext`, `slackRead`, `slackReferences` |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` CLI: `listen`, `api`, `auth`; token storage; Socket Mode and Web API calls. | `main(argv, io)`, `loadConfig`, `saveConfig`, `listen`, `api`, `auth` |
 
 The plugin entry follows `src/sources/feishu.ts`: `export const name = 'dsh-superagent-slack'`, `export const inject = ['orchestrator']`, and an `apply(ctx)` that registers the kind and starts `runSlack(sourceContext(host, slackKind), signal)` in an effect that aborts and awaits on dispose.
@@ -452,9 +452,10 @@ A reply is `chat.postMessage` with three fields:
   channel: address.conversation,
   text: message.text,
   thread_ts: address.thread_ts ?? address.ts,
-  ...(clientMessageId ? { client_msg_id: clientMessageId } : {}),
 }
 ```
+
+No `client_msg_id` is sent: Slack requires a UUID there, while the receipt id is a 32-hex SHA-256 slice, and Slack documents no deduplication. Delivery stays at-least-once (section 10.4).
 
 Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. This is the rule that makes a DM behave like Feishu: each DM message starts its own Thread and the answer is posted under that message (section 16 of the ratified decisions). A top-level channel message starts a Thread the same way, so answers never sprawl into the channel.
 
@@ -466,7 +467,7 @@ There is no Block Kit, no `blocks`, no `markdown_text`, no `chat.update`, and no
 
 ### 10.3 Errors
 
-`slack-bridge api` prints Slack's response JSON on standard output and exits `1` when `ok` is false. The Source maps the error code:
+`slack-bridge api` prints Slack's response JSON on standard output and exits `0` whenever Slack answered, including `ok: false`; exit `1` is a transport or parse failure, and exit `2` is usage or malformed input. The Source maps the error code:
 
 | Code | Outcome |
 | --- | --- |
@@ -477,16 +478,16 @@ There is no Block Kit, no `blocks`, no `markdown_text`, no `chat.update`, and no
 | `missing_scope` | permanent, with a health error naming the missing scope |
 | anything else | retryable until the Outbox gives up, as for any other Source |
 
-The bridge removes HTTP-level noise: a network failure exits nonzero with a diagnostic on standard error, and a JSON body that is not Slack's error shape is treated as a transport failure.
+The bridge removes HTTP-level noise: a network failure exits `1` with a diagnostic on standard error, and a JSON body that is not Slack's error shape is treated as a transport failure.
 
 ### 10.4 Idempotency
 
-Slack has no server-side idempotency key. `client_msg_id` is accepted and echoed back, but Slack documents no duplicate suppression ([`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage)). The design accepts at-least-once delivery:
+Slack has no server-side idempotency key, so the design accepts at-least-once delivery:
 
 - The Outbox receipt id is deterministic, so a crash and retry produce the same local record.
 - Only one reply is in flight globally, as the Outbox already enforces.
 - A send is retried only after an error. A send that Slack accepted is never retried, because acceptance means `ok: true`.
-- `client_msg_id` carries the receipt id. It is optional and used for diagnosis, not deduplication.
+- No `client_msg_id` is sent; it would add no deduplication guarantee (section 10.1).
 
 The duplicate risk is a crash between Slack accepting the message and the Outbox settling the receipt. On restart the reply is sent once more, producing two messages with the same text. The window is small, and the alternative, reading the thread back before every retry, costs an API call per send and is not part of v1.
 
@@ -506,7 +507,7 @@ slack/<trigger-id>/thread
 slack/<trigger-id>/around
 ```
 
-`SlackRef` is `{ triggerId, conversation, ts, threadTs? }`; `slackRef(trigger)` reads it from the Channel address and `trigger.meta`. Only `thread` and `around` take a cursor.
+`SlackRef` is `{ triggerId, conversation, ts, threadTs? }`; `slackRef(trigger)` reads it from the Channel address and `trigger.meta`. Both are defined and exported by `slack-trigger.ts` and imported by `slack-read.ts`, so the ref shape has one owner. Only `thread` and `around` take a cursor.
 
 | Part | Bridge call | Result |
 | --- | --- | --- |
@@ -535,6 +536,7 @@ Socket Mode does not promise delivery while the consumer is down. There is no "e
 - Skipped messages are the bot's own, the edit and delete subtypes, and messages in conversations that `scope` refuses. `message_changed` in history appears as the current text of the message, not as a separate entry.
 - The cursor advances to the loop start time only after a successful pass; an error leaves it in place and reports `history:slack`.
 - Conversations to backfill are the configured `chats` plus the conversations seen live and stored in `KV.slack.conversations` (with a `direct` flag). Slack offers no way to enumerate DMs, so a DM is only known after its first live event; this is the same limitation the Feishu Source accepts.
+- Each pass re-reads the configuration, so a public conversation added to `chats` is joined on the next pass, roughly every 60 seconds, without a restart. A private conversation still needs an invitation and reports `slackNotAMember` until it has one.
 
 Backfill is sequential across conversations. `conversations.history` is tier 3, so a page size of 200 and one conversation at a time stay inside the limit; a 429 is handled by the bridge as in section 10.3.
 
@@ -574,7 +576,7 @@ Stdout is never used for diagnostics. A malformed line on stdout is a bug: the S
 
 ### 13.5 api passthrough
 
-`api` prints Slack's response JSON verbatim on stdout, including `{ "ok": false, "error": "…" }`, and exits 1 for `ok: false`. A transport failure prints a human sentence on stderr and exits 1, with no JSON on stdout. A 429 response causes the bridge to sleep for `Retry-After` seconds, capped at 60, and retry up to twice; the caller sees one response. The cap matters because the Outbox retries every five seconds, and a bridge that blocks for fifteen minutes would stall the reply queue.
+`api` prints Slack's response JSON verbatim on stdout, including `{ "ok": false, "error": "…" }`, and exits `0` whenever Slack answered, whether `ok` is true or false. A transport failure or a response that cannot be parsed prints a human sentence on stderr and exits `1`, with no JSON on stdout; usage errors and malformed input exit `2`. A 429 response causes the bridge to sleep for `Retry-After` seconds, capped at 60, and retry up to twice; the caller sees one response. The cap matters because the Outbox retries every five seconds, and a bridge that blocks for fifteen minutes would stall the reply queue.
 
 `api` does not implement Slack-specific pagination: it calls one method once. Cursor loops live in the Source, where the cursor can be persisted.
 
@@ -634,7 +636,7 @@ Tests write a `fake-slack-bridge` shell script into a temporary directory and po
 | `flaky` | exits 1 before readiness |
 | `late` | prints readiness after a delay |
 | `bad-json` | prints a non-JSON line on stdout after readiness |
-| `api-<method>` | prints a canned JSON response and exits 0 or 1 |
+| `api-<method>` | prints a canned JSON response and exits 0 (or 1 for a simulated transport failure) |
 
 The fake is a real process, so readiness timeouts, restarts, backoff, and health transitions are tested without network access. `tests/slack-bridge.spec.ts` tests the real bridge only where it needs no Slack connection: argv parsing, config permissions, `auth` validation failure, and the shape of the JSON it prints; the Socket Mode client itself is not unit-tested.
 
@@ -734,7 +736,7 @@ export interface Deployment {
 }
 ```
 
-`Probe` is the existing `workerProbe` signature: `(program: string, args: string[], cwd?: string) => Promise<string>`. The probe receives the raw config because it needs `cli`; it returns an opaque profile that only the kind reads.
+`Probe` is `(argv: string[]) => Promise<string>`, matching the existing `workerProbe`: the first element is the program and the rest are its arguments. The probe receives the raw config because it needs `cli`; it returns an opaque profile that only the kind reads. The core stores `Deployment.sources` as an untyped record keyed by kind; each kind validates its own profile, and no core typed accessor is introduced.
 
 The Slack kind's `setup` is:
 
@@ -743,12 +745,14 @@ setup: {
   fields: ['cli'],
   async probe({ machine, config, run }) {
     const cli = executable('slack-bridge', String(config.cli), …)
-    const identity = JSON.parse(await run(cli, ['api', 'auth.test']))
+    const identity = JSON.parse(await run([cli, 'api', 'auth.test']))
     if (!identity.ok) throw new SetupError('slackAuthFailed', { error: identity.error })
     return { cli, teamId: identity.team_id, team: identity.team, botId: identity.bot_id, userId: identity.user_id, url: identity.url }
   },
 }
 ```
+
+The bridge exits `0` whenever Slack answered, so `run` returns the `ok: false` body and the probe raises the structured setup error itself.
 
 The Feishu kind's `setup` wraps `resolveFeishuBot` unchanged, with `fields: ['cli']`.
 
@@ -760,11 +764,15 @@ The Feishu kind's `setup` wraps `resolveFeishuBot` unchanged, with `fields: ['cl
 | `src/setup.ts` | `SetupPlace` union, fixed `SETUP_PROBLEMS` | `SetupProblem.place` is a kind string, `SETUP_PROBLEMS` gains per-kind codes, `SetupCode` stays a key union |
 | `src/app/setup.ts` | `problem`, `feishuProblem`, `checkAccounts` branching on `source:feishu` | `problems: Map<string, SetupProblem>`, a loop over registered kinds, `check()` fails on any enabled kind's problem |
 | `src/app/source-context.ts` | `setupProblem`, `feishuProblem`, a `find` on `place` | `problems: ReadonlyMap<string, SetupProblem>`; `problem` is `problems.get(kind.kind)` |
+| `src/infra/commands.ts` | `lark()` reads `deployment.feishu` | `lark()` reads `deployment.sources.feishu`; a Slack accessor sits beside it |
 | `src/app/runtime.ts`, `src/app/http.ts` | pass `feishuProblem` | pass the map |
 | `src/app/views/settings.ts` | `SETUP_FIELDS[instance.id]` | `kind.setup?.fields ?? []` |
+| `src/app/views/sources.ts` | `SetupState` carries `problem` and `feishuProblem`; `problemOf` scans them | `SetupState` carries one `problems` map; `problemOf` looks up the kind |
 | `src/client/deployment.tsx`, `overview.tsx` | Feishu-specific rows and label keys | iterate the deployment profiles; the "check failed" row is keyed by kind |
 | `src/sources/kind.ts` | `ChannelLinks = { repository?, feishu? }` | `ChannelLinks = { repository?: string; sources: Readonly<Record<string, unknown>> }` |
 | `src/app/links.ts` | passes `{ feishu }` | passes `{ repository, sources }` |
+
+The HTTP setup payload becomes `problems: Record<string, { code: string; message: string }>`, keyed by kind; no Feishu-specific key remains in state or the panel. A Source card reads its problem from `problems[<kind>]`.
 
 The `setupFields` change-detection function iterates the registered kinds and serializes the named keys, preserving its current JSON-array comparison so that editing a CLI path still restarts the services. A kind without `setup` (GitHub is not a kind, but an experimental Source might be) contributes no fields and no probe.
 
@@ -780,7 +788,7 @@ The `setupFields` change-detection function iterates the registered kinds and se
 
 1. Registering `slackKind` without touching `src/app/setup.ts`, `src/deployment.ts`, `src/app/http.ts`, or the client produces a Settings card, a setup probe, health entries, and a deployment profile.
 2. A failing Slack probe pauses only the Slack Source; the rest of the service keeps running, as a failing Feishu probe does today.
-3. Feishu resolves, reports, and replies exactly as before; the existing tests pass without edits other than removed imports.
+3. Feishu resolves, reports, and replies exactly as before. Phase 0a still needs mechanical fixture and payload edits: 9 test files construct Feishu deployments through `testDeployment` (whose default includes `feishu`) or read `deployment.feishu`, and `feishuProblem` appears in panel, service-script, client, and settings fixtures.
 4. `ChannelLinks` call sites compile with `{ repository, sources }`, and `feishuLink` reads its profile from `sources.feishu`.
 5. The TypeScript build and `pnpm vitest run` both pass.
 
@@ -878,7 +886,7 @@ The command prints the workspace and bot it validated and writes `~/.slack-dsh-s
 
 ### 16.4 Settings
 
-The Source card has one field for the bridge path, the conversation rows, the other-conversations choice, the direct-message switch, and two advanced numbers. A filled-in example is in section 6. The setup fields are `cli`: changing the path triggers a setup re-check, like changing the Feishu `cli`.
+The Source card has one field for the bridge path, the conversation rows, the other-conversations choice, the direct-message switch, and two advanced numbers. A filled-in example is in section 6. The setup fields are `cli`: changing the path triggers a setup re-check, like changing the Feishu `cli`. The card's setup problem is the `slack` entry of the state payload's `problems` map (section 15.3); a kind with no problem has no entry.
 
 ### 16.5 Policy
 
@@ -904,7 +912,7 @@ The Source card has one field for the bridge path, the conversation rows, the ot
 
 ### 16.6 Joining conversations
 
-- A configured public channel is joined automatically with `conversations.join` when the bot is not a member ([`conversations.join`](https://docs.slack.dev/reference/methods/conversations.join)). The join is attempted at startup and when the configuration changes, not in the event loop, and a failure (for example `is_archived` or `missing_scope`) is a `slackNotAMember` health detail naming the conversation.
+- A configured public channel is joined automatically with `conversations.join` when the bot is not a member ([`conversations.join`](https://docs.slack.dev/reference/methods/conversations.join)). The join is attempted at startup and reconciled on every backfill pass, which re-reads the configuration roughly every 60 seconds, so adding or removing a public channel takes effect without a restart; a failure (for example `is_archived` or `missing_scope`) is a `slackNotAMember` health detail naming the conversation.
 - A private channel cannot be joined by the bot. An operator invites the app with **Invite** in the channel; until then Slack sends no `message.groups` event for it, and the health detail says the conversation is configured but the bot is not a member.
 - A DM needs no join. The Messages tab or a direct mention opens the conversation, and `message.im` starts arriving.
 - The Source never posts into a public channel it was not invited to, even with `chat:write.public`; the scope is deliberately absent.
@@ -1014,6 +1022,8 @@ The implementation touches these files. The table is the debt list: each row is 
 | `src/setup.ts` | `SetupPlace` becomes a kind string, Slack codes | one problem per kind |
 | `src/app/setup.ts` | map of problems, loop over kinds, probe per kind | no third special case |
 | `src/app/source-context.ts` | `problems` map | each kind reads its own problem |
+| `src/infra/commands.ts` | `lark()` reads `deployment.sources.feishu`; a Slack accessor sits beside it | shared command access |
+| `src/app/views/sources.ts` | one `problems` map keyed by kind; `problemOf` looks up the kind | panel reads per-kind setup state |
 | `src/app/outbox.ts` | use `channel.words`, not `source === 'feishu'` | the 100-word rule applies to every chat Source |
 | `src/app/links.ts` | pass `sources` instead of `feishu` | generalized profile access |
 | `src/app/resources.ts` | `slack/` reader, `slackRef`, `slackReferences`; make the Feishu-only branches kind-driven | the Executor reads Slack originals |
@@ -1021,6 +1031,8 @@ The implementation touches these files. The table is the debt list: each row is 
 | `src/app/views/settings.ts` | `kind.setup?.fields` | restart detection per kind |
 | `src/client/deployment.tsx`, `overview.tsx` | iterate profiles; kind-keyed labels | panel |
 | `src/client/locales.ts` | Slack source, health, problem, skill, deployment keys | localization |
+| `src/client/provider.tsx` | follow the kind-keyed `problems` map | panel payload typing |
+| `tests/fixtures/` | build `sources` profiles and kind-keyed problems | tests exercise the new payload |
 | `src/infra/text.ts` | `checkedImText(text, limit)`, keep `IM_WORDS` as the default | one rule, two channels |
 | `src/infra/environment.ts` | `slack-bridge` in `WORKER_COMMANDS` and the shim | workers call the bridge |
 | `src/app/prompts.ts`, `context.ts`, `skill-files.ts`, `sessions.ts` | `skill/slack`, bundled skill, built-in names | prompts |
@@ -1060,11 +1072,11 @@ The tests follow the patterns already in the repository: real `Store` in a temp 
 | Test | Covers |
 | --- | --- |
 | `tests/slack-trigger.spec.ts` | each event type becomes the expected Trigger; ids are stable across two parses; bot messages (`bot_id`, `bot_profile`, `subtype: 'bot_message'`) are dropped; threads and DMs get the documented thread ids; the same envelope twice yields one Trigger id; edited timestamp does not change the id |
-| `tests/slack-channel.spec.ts` | `chat.postMessage` argv with and without `thread_ts`; `client_msg_id`; text checking; `gone` for `channel_not_found`, `is_archived`, `not_in_channel`; `link` from permalinks including custom domains; `words` asks for the 100-word check |
+| `tests/slack-channel.spec.ts` | `chat.postMessage` argv with and without `thread_ts`; no `client_msg_id`; text checking; `gone` for `channel_not_found`, `is_archived`, `not_in_channel`; `link` from permalinks including custom domains; `words` asks for the 100-word check |
 | `tests/slack-read.spec.ts` | `conversations.replies` pages and oldest-first ordering; a message with `thread_ts` absent reads neighbours; edited text appears from a read; `reply_to` mapping; both URL forms |
 | `tests/slack.spec.ts` | `scope()` for listed, other, and direct with every `listen` combination; admission rows match the table; `channel.allowed` agrees with `scope()`; policy schema rejects a non-`U…`/`W…` id; roster order is preserved; `environment.values` for Slack and non-Slack Triggers; `repliesTo` for a reply and for a parent |
 | `tests/slack-loop.spec.ts` | fake bridge in the modes of section 13.8: ready, warn, flaky, events, late, never; readiness timeout message; backoff numbers 1000/2000/…/60000; stop during spawn; `app_rate_limited` sets a warning; `app_uninstalled` sets an error and stops retrying forever |
-| `tests/slack-bridge.spec.ts` | `auth` writes `0600` and rejects a client-side `ok:false`; `api` exit codes and error line; `listen` maps `disconnect` to exit 1 and prints NDJSON only on stdout; token never in argv or output |
+| `tests/slack-bridge.spec.ts` | `auth` writes `0600` and rejects a client-side `ok:false`; `api` exits 0 for `ok:true` and `ok:false`, 1 for a transport or parse failure, 2 for usage; `listen` maps `disconnect` to exit 1 and prints NDJSON only on stdout; token never in argv or output |
 | `tests/sources.spec.ts` (extended) | the Feishu consumer still works after the supervisor extraction; a Slack instance is admitted, replied to, and ignored through the Outbox; the Feishu word check still fires; a Slack reply over 100 words is rejected with the standard message |
 | `tests/docs.spec.ts` | numbering, links, and the 007 module and test tables, including the new files |
 
@@ -1099,13 +1111,12 @@ Only genuine unknowns are listed. Each has a proposed default, so none blocks im
 1. **Does Socket Mode replay events after a disconnect?** Slack's page says the app must acknowledge events and describes the client as reconnecting, but it does not document an offline buffer. [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode). **Default:** treat the stream as lossy, never depend on replay, and rely on the backfill cursor. Implementations must not assume exclusivity with the backfill either.
 2. **Does a mention also produce a `message.channels` event?** The event pages say `app_mention` "is not a message like the message.* event types", which suggests both are delivered, but do not state it. [`app_mention`](https://docs.slack.dev/reference/events/app_mention), [`message.channels`](https://docs.slack.dev/reference/events/message.channels). **Default:** assume double delivery is possible and dedupe on the deterministic Trigger id, which both translations produce from the same `ts`. If testing shows `app_mention` is the only delivery, the dedupe is harmless.
 3. **What is the exact `chat.postMessage` rate for a new app?** Slack calls it a special tier and describes it as roughly one message per channel per second without stating the burst. [Rate limits](https://docs.slack.dev/apis/web-api/rate-limits). **Default:** one send at a time globally and `Retry-After` on 429; do not tune against the number.
-4. **How long does `client_msg_id` deduplicate?** Slack documents the field but not a deduplication guarantee ([`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage)). **Default:** send it as a best-effort hint and keep the at-least-once contract of section 10.4.
-5. **Is `thread_ts` always present on `app_mention` for a threaded mention?** The event page says it is carried "in practice" but the field is optional in the payload. **Default:** when absent, treat the message as top-level and start a thread on it; do not make an extra read to recover the parent.
-6. **Does `thread_broadcast` produce one event or two?** A broadcast reply reaches both the channel and the thread, and the message event page lists `thread_broadcast` as a subtype without stating the delivery count. **Default:** dedupe on the Trigger id, which is the same for either delivery.
-7. **Does editing a message's `ts` change?** Edits arrive as `message_changed` with the same `ts`; deleted messages keep their `ts` in the event. Neither is a trigger, so this only matters for reads, where the current text is returned. **Default:** no action; document that an edited original may read differently from the Trigger text.
-8. **Does `conversations.replies` include replies older than the parent when `latest` is set?** The endpoint accepts `oldest`/`latest`, and the page does not describe their interaction with thread paging. [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies). **Default:** page by cursor, never by time, inside a thread.
-9. **What is the exact lifetime of an `xoxb-` token when `token_rotation_enabled` is false?** Slack describes it as long-lived and revocable, not immortal ([Tokens](https://docs.slack.dev/authentication/tokens)). **Default:** treat any `invalid_auth` as revocation and surface `slackTokenRevoked`; never retry a revoked token forever.
-10. **Is `app_uninstalled` guaranteed within a bounded time?** The event page does not state a delay. **Default:** also run `auth.test` on every reconnect and on each backfill round, so a missing event still becomes an error within a minute.
+4. **Is `thread_ts` always present on `app_mention` for a threaded mention?** The event page says it is carried "in practice" but the field is optional in the payload. **Default:** when absent, treat the message as top-level and start a thread on it; do not make an extra read to recover the parent.
+5. **Does `thread_broadcast` produce one event or two?** A broadcast reply reaches both the channel and the thread, and the message event page lists `thread_broadcast` as a subtype without stating the delivery count. **Default:** dedupe on the Trigger id, which is the same for either delivery.
+6. **Does editing a message's `ts` change?** Edits arrive as `message_changed` with the same `ts`; deleted messages keep their `ts` in the event. Neither is a trigger, so this only matters for reads, where the current text is returned. **Default:** no action; document that an edited original may read differently from the Trigger text.
+7. **Does `conversations.replies` include replies older than the parent when `latest` is set?** The endpoint accepts `oldest`/`latest`, and the page does not describe their interaction with thread paging. [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies). **Default:** page by cursor, never by time, inside a thread.
+8. **What is the exact lifetime of an `xoxb-` token when `token_rotation_enabled` is false?** Slack describes it as long-lived and revocable, not immortal ([Tokens](https://docs.slack.dev/authentication/tokens)). **Default:** treat any `invalid_auth` as revocation and surface `slackTokenRevoked`; never retry a revoked token forever.
+9. **Is `app_uninstalled` guaranteed within a bounded time?** The event page does not state a delay. **Default:** also run `auth.test` on every reconnect and on each backfill round, so a missing event still becomes an error within a minute.
 
 
 
