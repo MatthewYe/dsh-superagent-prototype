@@ -45,12 +45,19 @@ export interface BridgeIo {
   stdin: () => Promise<string>
 }
 
+/** A Socket Mode URL opened only long enough to prove the app token works; `auth` closes it at once. */
+export interface SlackUrlSocket {
+  close: () => void
+}
+
 /** Everything the CLI touches outside its own code, so tests never read the real home or reach Slack. */
 export interface BridgeDeps {
   env: Record<string, string | undefined>
   version: string
   createWebApi: (token: string) => SlackApi
   createSocket: (appToken: string) => SlackSocket
+  /** Opens the URL `apps.connections.open` returned; the caller closes it immediately. */
+  openSocketUrl: (url: string) => SlackUrlSocket
   sleep: (milliseconds: number) => Promise<void>
   now: () => Date
   onSignal: (handler: () => void) => () => void
@@ -212,6 +219,10 @@ export function defaultDeps(): BridgeDeps {
     version: packageVersion(),
     createWebApi: token => createWebApi(token),
     createSocket,
+    openSocketUrl: url => {
+      const socket = new WebSocket(url)
+      return { close: () => socket.close() }
+    },
     sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     onSignal: handler => {
@@ -317,6 +328,13 @@ async function authenticate(io: BridgeIo, deps: BridgeDeps): Promise<number> {
       io.err(`Slack rejected the app token: ${slackError(connection)}`)
       return 1
     }
+    const socketUrl = textField(connection.url)
+    if (!socketUrl) {
+      io.err('Slack accepted the app token but did not return a Socket Mode URL')
+      return 1
+    }
+    // The URL is a live Socket Mode session; authentication only needs to know Slack issued one.
+    deps.openSocketUrl(socketUrl).close()
   } catch (error) {
     io.err(authFailure(error, secrets))
     return 1
