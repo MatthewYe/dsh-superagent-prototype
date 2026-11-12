@@ -15,6 +15,12 @@ export const HEALTH_TEXT = {
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
   slackBridgeUnset: 'The Source is on, and its slack-bridge is not set',
+  slackBridgeMissing: 'The slack-bridge executable cannot run',
+  slackTokenRevoked: 'Slack rejected the bot token',
+  slackAppUninstalled: 'The app was uninstalled from the workspace',
+  slackNotAMember: 'The bot is not a member of a configured conversation',
+  slackTeamChanged: 'The workspace does not match the configured team',
+  slackRateLimited: 'Slack rate limited the last call and the bridge is waiting to retry',
   slackConnected: 'Connected to {team} as @{bot}',
   slackFirstPass: 'Waiting for the first history pass',
 } as const

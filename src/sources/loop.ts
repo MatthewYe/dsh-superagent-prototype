@@ -2,10 +2,15 @@
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
-import { health, type SourceContext } from './host.ts'
+import { health, type Health, type SourceContext } from './host.ts'
 
 const LINE_LIMIT = 1_048_576
 const DEFAULT_TIMEOUT_MS = 45_000
+
+/** A line handler throws this to stop the consumer for good: the supervisor reports its health and does not restart it. */
+export class ConsumerFatal extends Error {
+  override name = 'ConsumerFatal'
+}
 
 /** One long-running Source process, its readiness signal, and what to do with each stdout line. */
 export interface Consumer {
@@ -26,6 +31,8 @@ export interface Consumer {
   oversized: string
   /** Called for each stdout line, in order; a rejection is reported on the consumer's health entry. */
   line: (line: string) => void | Promise<void>
+  /** Builds the health reported when the consumer exits, with the number of failures since it was last ready. */
+  failure?: (failures: number, error: unknown) => Health
   /** How long to wait for readiness; 45 seconds by default. */
   timeoutMs?: number
 }
@@ -41,6 +48,7 @@ export const consumerRetry = (previous: number | undefined, ranMs: number): numb
 export async function supervise(ctx: SourceContext, consumer: Consumer, signal: AbortSignal): Promise<void> {
   await ctx.ready
   let retry: number | undefined
+  let failures = 0
   while (!signal.aborted) {
     if (!ctx.config(consumer.kind)) {
       ctx.report(consumer.kind, health('paused', 'sourceOff'))
@@ -52,9 +60,14 @@ export async function supervise(ctx: SourceContext, consumer: Consumer, signal: 
     const stop = (): void => running.abort()
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()
-    try { await consume(ctx, consumer, running.signal) }
-    catch (error) { if (!running.signal.aborted) ctx.report(consumer.kind, { state: 'error', detail: String(error) }) }
-    finally { clearInterval(check); signal.removeEventListener('abort', stop) }
+    try { await consume(ctx, consumer, running.signal, () => { failures = 0 }) }
+    catch (error) {
+      if (error instanceof ConsumerFatal) return
+      if (!running.signal.aborted) {
+        failures += 1
+        ctx.report(consumer.kind, consumer.failure?.(failures, error) ?? { state: 'error', detail: String(error) })
+      }
+    } finally { clearInterval(check); signal.removeEventListener('abort', stop) }
     if (running.signal.aborted) continue
     retry = consumerRetry(retry, Date.now() - began)
     await delay(retry, undefined, { signal }).catch(() => {})
@@ -62,10 +75,10 @@ export async function supervise(ctx: SourceContext, consumer: Consumer, signal: 
 }
 
 /** One run of the consumer: ready line on stderr, stdout lines one after another, stopped on abort or readiness timeout. */
-async function consume(ctx: SourceContext, consumer: Consumer, signal: AbortSignal): Promise<void> {
+async function consume(ctx: SourceContext, consumer: Consumer, signal: AbortSignal, onReady: () => void): Promise<void> {
   const child = spawn(consumer.command, consumer.args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...consumer.env } })
   const stdout = createInterface({ input: child.stdout }); const stderr = createInterface({ input: child.stderr })
-  let chain = Promise.resolve(); let diagnostic = ''; let ready = false
+  let chain = Promise.resolve(); let diagnostic = ''; let ready = false; let fatal: ConsumerFatal | undefined
   const stop = (): void => { child.stdin.end(); child.kill('SIGTERM') }
   signal.addEventListener('abort', stop, { once: true })
   const timeout = setTimeout(() => {
@@ -75,7 +88,7 @@ async function consume(ctx: SourceContext, consumer: Consumer, signal: AbortSign
   stderr.on('line', (line: string) => {
     diagnostic = line.slice(0, 4000)
     if (line.startsWith(consumer.ready)) {
-      ready = true; clearTimeout(timeout)
+      ready = true; clearTimeout(timeout); onReady()
       ctx.report(consumer.kind, { state: 'ready', detail: consumer.listening, at: new Date().toISOString() })
     } else if (/WARN|drop|error/.test(line)) ctx.report(consumer.kind, { state: 'error', detail: diagnostic })
   })
@@ -83,13 +96,16 @@ async function consume(ctx: SourceContext, consumer: Consumer, signal: AbortSign
     chain = chain.then(async () => {
       if (line.length > LINE_LIMIT) throw new Error(consumer.oversized)
       await consumer.line(line)
-    }).catch(error => { ctx.report(consumer.kind, { state: 'error', detail: String(error) }) })
+    }).catch(error => {
+      if (error instanceof ConsumerFatal) { fatal = error; stop(); return }
+      ctx.report(consumer.kind, { state: 'error', detail: String(error) })
+    })
   })
   try {
     await new Promise<void>((resolve, reject) => {
       child.once('error', reject)
       const exited = (code: number | null) => new Error(`${consumer.name} exited (${code}, ready=${ready}): ${diagnostic}`)
-      child.once('close', code => signal.aborted ? resolve() : reject(exited(code)))
+      child.once('close', code => fatal ? reject(fatal) : signal.aborted ? resolve() : reject(exited(code)))
     })
   } finally { clearTimeout(timeout); signal.removeEventListener('abort', stop); stdout.close(); stderr.close(); await chain }
 }

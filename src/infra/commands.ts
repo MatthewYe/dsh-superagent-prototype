@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
 import type { FeishuBot } from '../sources/feishu-setup.ts'
+import type { SlackProfile } from '../sources/slack-setup.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -110,6 +111,16 @@ export class Commands {
     const code = result.error?.code
     if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
     return result.data
+  }
+  /** Runs the Slack bridge with the deployment's configured installation. */
+  async slack(args: string[]): Promise<string> {
+    const bridge = this.deployment.sources.slack as SlackProfile | undefined
+    if (!bridge) throw new Error('The Slack Source has no working bridge')
+    return this.run(bridge.cli, args)
+  }
+  /** Runs the Slack bridge and parses its JSON answer. */
+  async slackJson<T>(args: string[], schema: z.ZodType<T>): Promise<T> {
+    return schema.parse(JSON.parse(await this.slack(args)))
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
