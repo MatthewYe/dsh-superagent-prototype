@@ -5,7 +5,7 @@ import { KV } from '../kv.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { ConsumerFatal, supervise, type Consumer } from './loop.ts'
 import { checkSlackToken, markTokenEvent, reportSlackToken, slackAuthTest, type SlackAuthReply } from './slack-auth.ts'
-import { runSlackHistory } from './slack-history.ts'
+import { rememberSlackThread, runSlackHistory } from './slack-history.ts'
 import { SlackPolicySchema, type SlackPolicy } from './slack-policy.ts'
 import { slackProfile, type SlackProfile } from './slack-setup.ts'
 import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
@@ -85,6 +85,7 @@ export async function handleFrame(ctx: SourceContext, frame: unknown, config: Sl
   const direct = trigger.meta.direct === true
   const known = ctx.state.get(KV.slack.conversations) ?? {}
   if (known[conversation] !== direct) ctx.state.set(KV.slack.conversations, { ...known, [conversation]: direct })
+  rememberSlackThread(ctx, trigger)
   await ctx.receive(trigger)
 }
 

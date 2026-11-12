@@ -138,10 +138,14 @@ Modules table:
 | Path | Responsibility |
 | --- | --- |
 | `src/sources/slack.ts` | Slack Source kind: configuration, fields, scope, Channel, thread context, Policy part, environment, plugin entry. |
+| `src/sources/slack-auth.ts` | The `auth.test` checks shared by the socket loop and the history pass: workspace identity, the `slackTokenRevoked` and `slackConnected` health outcomes. |
 | `src/sources/slack-trigger.ts` | Translates Slack Socket Mode event envelopes into Triggers; deterministic Trigger and Thread ids; mrkdwn to text. |
-| `src/sources/slack-loop.ts` | Runs the `slack-bridge listen` consumer, its restart and health, and the per-conversation backfill and label loops. |
+| `src/sources/slack-loop.ts` | Runs the `slack-bridge listen` consumer, its restart and health, and admits live events. |
 | `src/sources/slack-channel.ts` | Sends replies through `chat.postMessage` and builds Slack archive links. |
 | `src/sources/slack-read.ts` | Reads Slack thread context and `slack/` resources for assessments and the Executor. |
+| `src/sources/slack-setup.ts` | Resolves the Slack deployment profile through `slack-bridge api auth.test` and owns the bridge setting schema. |
+| `src/sources/slack-history.ts` | Backfills history and tracked-thread replies, joins public conversations, and caches conversation names. |
+| `src/sources/slack-policy.ts` | Slack Policy schema and roster synchronization from one conversation's members. |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` CLI: Socket Mode listener, Web API passthrough, and token configuration. |
 
 Tests table:
@@ -151,8 +155,13 @@ Tests table:
 | `tests/slack-trigger.spec.ts` | Event translation, self-echo, bot senders, subtypes, deterministic ids, mrkdwn to text. |
 | `tests/slack-read.spec.ts` | Thread context parts, pagination, the top-level fallback, edited text. |
 | `tests/slack-channel.spec.ts` | Reply shape, `thread_ts`, error mapping, links. |
-| `tests/slack.spec.ts` | Fake bridge: readiness, event stream, restart and backoff, health, backfill, stop. |
+| `tests/slack.spec.ts` | Config schema, scope, admission, and the reply limit. |
+| `tests/slack-loop.spec.ts` | Fake bridge end to end: readiness, events, restart and backoff, health, Outbox replies, stop. |
+| `tests/slack-backfill.spec.ts` | Cursor and window reads, pagination, threaded replies, joins, names, and failure health. |
+| `tests/slack-policy.spec.ts` | Policy schema, roster synchronization, and label refresh. |
+| `tests/slack-setup.spec.ts` | Slack config and bridge probe. |
 | `tests/slack-bridge.spec.ts` | Bridge argv, config permissions, `auth`, `api` passthrough, exit codes, signals. |
+| `tests/slack-bridge-build.spec.ts` | Built package entry and executable, and Slack SDK import isolation. |
 
 ## 5. The Source kind
 
@@ -532,6 +541,7 @@ Socket Mode does not promise delivery while the consumer is down. There is no "e
 - Later, a pass reads from `cursor - 5 seconds` to the loop start, capped at `now - backfillDays` (default 14, maximum 14). Five seconds of overlap covers a message that arrived while the previous page was being read; the Trigger id makes the overlap harmless.
 - The read is `conversations.history` with `oldest` and `latest` and `limit: 200`, newest first. Pages are collected, sorted ascending by `ts`, and emitted oldest-first, so the agent sees a conversation in order even though the API returns it backwards.
 - A message with `reply_count > 0` or a `latest_reply` newer than the cursor is followed by `conversations.replies` pages for that thread, also oldest-first. A reply that arrived after its parent but before the cursor window is still read.
+- The pass also follows the thread roots the agent is engaged in. Every admitted live message and every admitted history Trigger records its root in `KV.slack.threads(conversation)` with the time of that engagement. Each pass reads `conversations.replies` with `oldest = cursor - 5 seconds` for the newest such roots, keeping at most 100 roots per conversation whose last engagement is within 14 days. Roots outside either bound are dropped, so the follow-up set cannot grow without limit. This is how a reply to a root older than the current history page still becomes a Trigger; the deterministic Trigger id keeps any overlap harmless.
 - Translation is the same function as for live events. A message that was already a Trigger returns `duplicate` from intake and costs nothing.
 - Skipped messages are the bot's own, the edit and delete subtypes, and messages in conversations that `scope` refuses. `message_changed` in history appears as the current text of the message, not as a separate entry.
 - The cursor advances to the loop start time only after a successful pass; an error leaves it in place and reports `history:slack`.
@@ -783,7 +793,7 @@ The Feishu kind's `setup` wraps `resolveFeishuBot` unchanged, with `fields: ['cl
 
 The HTTP setup payload becomes `problems: Record<string, { code: string; message: string }>`, keyed by kind; no Feishu-specific key remains in state or the panel. A Source card reads its problem from `problems[<kind>]`.
 
-The `setupFields` change-detection function iterates the registered kinds and serializes the named keys, preserving its current JSON-array comparison so that editing a CLI path still restarts the services. A kind without `setup` (GitHub is not a kind, but an experimental Source might be) contributes no fields and no probe.
+The `setupFields` change-detection function iterates the registered kinds and serializes the named keys, preserving its current JSON-array comparison so that editing a CLI path still restarts the services. A kind without `setup` contributes no fields and no probe.
 
 ### 15.4 Migration and compatibility
 
@@ -1027,7 +1037,7 @@ The implementation touches these files. The table is the debt list: each row is 
 | `src/sources/kind.ts` | add `ChannelLinks.sources`, `SourceChannel.words`, `SourceKind.setup` | per-source profiles, per-Channel word limit, kind-provided probes |
 | `src/sources/loop.ts` | new shared supervisor (Phase 0b) | one copy of spawn/readiness/restart/backoff/stop |
 | `src/sources/slack*.ts` | new modules | the Source itself |
-| `src/deployment.ts` | `Deployment.sources`, `resolveSlackBot`, no `SETUP_FIELDS` | per-source slots |
+| `src/deployment.ts` | `Deployment.sources`, `resolveSlackProfile`, no `SETUP_FIELDS` | per-source slots |
 | `src/setup.ts` | `SetupPlace` becomes a kind string, Slack codes | one problem per kind |
 | `src/app/setup.ts` | map of problems, loop over kinds, probe per kind | no third special case |
 | `src/app/source-context.ts` | `problems` map | each kind reads its own problem |
@@ -1070,7 +1080,7 @@ Phase 0 is required before any Slack code. Later phases may land as separate com
 
 **Phase 3: the kind and the loops.** `slack.ts` and `slack-loop.ts`, with the fake-bridge test. Acceptance: a fake stream produces Tickets; a killed consumer restarts with the documented backoff; health moves `starting → ready → error → ready`; backfill reads a gap once with five seconds of overlap and never duplicates.
 
-**Phase 4: setup, policy, panel, environment, prompts.** The `setup` member, `resolveSlackBot`, roster sync, the join check, the bridge shim, the skill, and the docs. Acceptance: a fresh install shows the Slack card and probe; Sync now fills the roster in a stable order; the worker sees both variables and can call `slack-bridge api`; the skill renders in the panel and the prompt.
+**Phase 4: setup, policy, panel, environment, prompts.** The `setup` member, `resolveSlackProfile`, roster sync, the join check, the bridge shim, the skill, and the docs. Acceptance: a fresh install shows the Slack card and probe; Sync now fills the roster in a stable order; the worker sees both variables and can call `slack-bridge api`; the skill renders in the panel and the prompt.
 
 **Phase 5: verification.** `pnpm vitest run`, the TypeScript build, and a manual walkthrough against a real workspace as in section 16.9. Acceptance: the documentation test passes, including the new 007 rows; a mention, an all-messages channel, a DM, a thread reply, and a restart after downtime all produce exactly one Ticket each.
 

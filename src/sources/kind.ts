@@ -51,15 +51,22 @@ export interface SourceSetup {
   /** Resolves this kind's deployment profile, or undefined when the kind is unconfigured. Throws SetupError on failure. */
   probe(input: { machine: Machine; config: Record<string, unknown>; run: Probe; signal: AbortSignal }): Promise<unknown>
 }
+/** Capabilities an outbound Channel gets from the registry: the bridge commands and an optional health report. */
+export type ChannelSendHost = Pick<SourceContext, 'commands'> & Partial<Pick<SourceContext, 'report'>>
+/** Classification a Channel attaches to a failed send; `permanent` means retrying the same message cannot succeed. */
+export class ChannelSendError extends Error {
+  override name = 'ChannelSendError'
+  constructor(message: string, readonly outcome: 'permanent' | 'retryable') { super(message) }
+}
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
   allowed?(address: Record<string, string>, config: C): boolean
   /**
    * Sends a message idempotently by ID; returns `'gone'` when the target conversation no longer accepts replies.
-   * @throws when delivery failed but may succeed on a later retry.
+   * @throws when delivery failed; a `ChannelSendError` with `outcome: 'permanent'` is not retried.
    */
-  send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  send(host: ChannelSendHost, message: OutboundMessage): Promise<'sent' | 'gone'>
   /** Hard word limit for replies in this Channel; the Outbox rejects a longer reply with the standard message. */
   words?: number
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */

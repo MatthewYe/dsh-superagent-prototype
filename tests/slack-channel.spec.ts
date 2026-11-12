@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { key, type OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
+import type { Health } from '../src/sources/host.ts'
 import { sendSlack, slackGone, slackLink, SlackSendError } from '../src/sources/slack-channel.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -13,6 +14,10 @@ const message = (overrides: Partial<OutboundMessage> = {}): OutboundMessage => (
 const host = (answer: unknown) => {
   const slack = vi.fn(async (_args: string[]) => JSON.stringify(answer))
   return { slack, host: { commands: { slack } as unknown as Commands } }
+}
+const reported = () => {
+  const reports: { entry: string; value: Health }[] = []
+  return { reports, report: (entry: string, value: Health) => { reports.push({ entry, value }) } }
 }
 
 describe('sendSlack', () => {
@@ -43,15 +48,22 @@ describe('sendSlack', () => {
 
   it('maps Slack error codes to retryable, permanent, and health outcomes', async () => {
     const failure = async (answer: Record<string, unknown>) => sendSlack(host(answer).host, message()).catch((error: unknown) => error)
+    const auth = reported()
+    const scope = reported()
     expect(await failure({ ok: false, error: 'msg_too_long' })).toMatchObject({ code: 'msg_too_long', outcome: 'permanent' })
     expect(await failure({ ok: false, error: 'invalid_arguments' })).toMatchObject({ code: 'invalid_arguments', outcome: 'permanent' })
     expect(await failure({ ok: false, error: 'invalid_blocks' })).toMatchObject({ code: 'invalid_blocks', outcome: 'permanent' })
-    expect(await failure({ ok: false, error: 'invalid_auth' })).toMatchObject({ code: 'invalid_auth', outcome: 'retryable', health: 'slackTokenRevoked' })
+    expect(await sendSlack({ ...host({ ok: false, error: 'invalid_auth' }).host, report: auth.report }, message()).catch((error: unknown) => error))
+      .toMatchObject({ code: 'invalid_auth', outcome: 'retryable', health: 'slackTokenRevoked' })
+    expect(auth.reports).toEqual([{ entry: 'slack', value: { state: 'error', detail: 'Slack rejected the bot token', code: 'slackTokenRevoked' } }])
     expect(await failure({ ok: false, error: 'token_revoked' })).toMatchObject({ code: 'token_revoked', outcome: 'retryable', health: 'slackTokenRevoked' })
     expect(await failure({ ok: false, error: 'ratelimited' })).toMatchObject({ code: 'ratelimited', outcome: 'retryable', health: 'slackRateLimited' })
-    const scope = await failure({ ok: false, error: 'missing_scope', needed: 'chat:write' })
-    expect(scope).toMatchObject({ code: 'missing_scope', outcome: 'permanent', health: 'slackTokenRevoked' })
-    expect(String(scope)).toContain('chat:write')
+    const missing = await sendSlack({ ...host({ ok: false, error: 'missing_scope', needed: 'chat:write' }).host, report: scope.report }, message())
+      .catch((error: unknown) => error)
+    expect(missing).toMatchObject({ code: 'missing_scope', outcome: 'permanent', health: 'slackTokenRevoked' })
+    expect(String(missing)).toContain('chat:write')
+    expect(scope.reports).toEqual([{ entry: 'slack', value: {
+      state: 'error', detail: 'Slack rejected the bot token: missing scope chat:write', code: 'slackTokenRevoked' } }])
     expect(await failure({ ok: false, error: 'some_new_error' })).toMatchObject({ code: 'some_new_error', outcome: 'retryable' })
     expect(await failure({ ok: false, error: 'some_new_error' })).toBeInstanceOf(SlackSendError)
   })

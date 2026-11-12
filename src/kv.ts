@@ -61,5 +61,7 @@ export const KV = {
    */
   slack: { conversations: record<Record<string, boolean>>('slack-conversations'),
     history: family<string, [conversation: string]>('slack-history:'),
+    /** Thread roots the agent is engaged in, mapped to the time of their latest admitted activity. */
+    threads: family<Record<string, string>, [conversation: string]>('slack-threads:'),
     people: record<Record<string, { name?: string; bot?: boolean; deleted?: boolean }>>('slack-people') },
 }

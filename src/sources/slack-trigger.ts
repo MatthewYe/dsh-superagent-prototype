@@ -21,18 +21,6 @@ export const SlackEventSchema = z.object({
 }).passthrough()
 export type SlackEvent = z.infer<typeof SlackEventSchema>
 
-/** The full frame the bridge prints; only `events_api` frames carry events. */
-export const SlackEnvelopeSchema = z.object({
-  type: z.literal('events_api'),
-  envelope_id: z.string(),
-  payload: z.object({
-    team_id: z.string(),
-    event_id: z.string().optional(),
-    event: SlackEventSchema,
-  }).passthrough(),
-}).passthrough()
-export type SlackEnvelope = z.infer<typeof SlackEnvelopeSchema>
-
 /** The bot identity from `auth.test`; `userId` is also the id Slack uses in mention tokens. */
 export interface SlackIdentity {
   botId: string

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
-import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
+import { backfillChat, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
@@ -300,12 +300,6 @@ describe('feishu source', () => {
     expect(tally.skipped).toBe(1)
     expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.messageId)).toEqual(['om_good'])
     h.store.close()
-  })
-  it('waits a second before restarting the event consumer after a run that stayed up for a minute, and backs off otherwise', () => {
-    expect(consumerRetry(undefined, 0)).toBe(1000)
-    expect(consumerRetry(1000, 500)).toBe(2000)
-    expect(consumerRetry(32_000, 500)).toBe(60_000)
-    expect(consumerRetry(60_000, 120_000)).toBe(1000)
   })
   it('syncs its part of the Policy from the sync chat: people who left are removed, names follow the chat, new people are appended', async () => {
     const h = host()
