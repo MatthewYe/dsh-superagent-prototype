@@ -754,6 +754,12 @@ const TEXT = {
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
   'healthCode.slackBridgeUnset': ['来源已打开，还没有设置 slack-bridge', HEALTH_TEXT.slackBridgeUnset],
+  'healthCode.slackBridgeMissing': ['slack-bridge 可执行文件无法运行', HEALTH_TEXT.slackBridgeMissing],
+  'healthCode.slackTokenRevoked': ['Slack 拒绝了这个机器人令牌', HEALTH_TEXT.slackTokenRevoked],
+  'healthCode.slackAppUninstalled': ['应用已从工作区卸载', HEALTH_TEXT.slackAppUninstalled],
+  'healthCode.slackNotAMember': ['机器人不在配置的会话中', HEALTH_TEXT.slackNotAMember],
+  'healthCode.slackTeamChanged': ['工作区与配置的团队不一致', HEALTH_TEXT.slackTeamChanged],
+  'healthCode.slackRateLimited': ['Slack 限制了最近一次调用，桥正在等待重试', HEALTH_TEXT.slackRateLimited],
   'healthCode.slackConnected': ['已连接到 {team}，机器人 @{bot}', HEALTH_TEXT.slackConnected],
   'healthCode.slackFirstPass': ['正在等待第一次历史读取', HEALTH_TEXT.slackFirstPass],
 } as const satisfies Record<string, readonly [string, string]>

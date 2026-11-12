@@ -1,6 +1,6 @@
 /** Validates Slack Socket Mode events, translates them into Triggers, and normalizes Slack mrkdwn. */
 import { z } from 'zod'
-import { key, type ChannelRef, type Trigger } from '../core/index.ts'
+import { key, type ChannelRef, type ScopeResult, type Trigger } from '../core/index.ts'
 
 export const SOURCE = 'slack'
 
@@ -38,6 +38,33 @@ export interface SlackIdentity {
   botId: string
   userId: string
 }
+
+/** The configuration fields that decide whether a conversation is listened to. */
+export interface SlackScopeConfig {
+  chats: { conversationId: string; listen: 'mentions' | 'all' }[]
+  otherChats: 'none' | 'mentions'
+  directMessages: boolean
+}
+
+/**
+ * Classifies a Trigger's conversation into the design's scope rows: a listed conversation, `other`, or `direct`.
+ * A listed row reports whether it observes unaddressed messages (`listen: 'all'`); the other rows do not.
+ */
+export function slackScope(meta: Record<string, unknown>, config: SlackScopeConfig): ScopeResult {
+  if (meta.direct === true || meta.direct === 'true') {
+    return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
+  }
+  const conversation = typeof meta.conversation === 'string' ? meta.conversation : ''
+  const chat = config.chats.find(item => item.conversationId === conversation)
+  if (chat) return { listened: true, observed: chat.listen === 'all', row: chat.conversationId }
+  return config.otherChats === 'mentions'
+    ? { listened: true, observed: false, row: 'other' }
+    : { listened: false, reason: 'conversation_not_allowed' }
+}
+
+/** Admits a listened Trigger when it addresses the bot, or when its row observes unaddressed messages. */
+export const slackAdmitted = (scope: ScopeResult, addressed: Trigger['addressed']): boolean =>
+  scope.listened && (addressed === 'mention' || addressed === 'direct' || scope.observed)
 
 /** Deterministic Trigger id; a redelivered Slack event carries the same message coordinates. */
 export const slackTriggerId = (conversation: string, ts: string): string => key(SOURCE, `${conversation}:${ts}`)
