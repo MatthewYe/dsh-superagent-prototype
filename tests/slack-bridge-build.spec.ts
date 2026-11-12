@@ -1,4 +1,4 @@
-/** The built package: the executable exists with its shebang, runs, and only it imports the Slack SDKs. */
+/** The built package: the Slack Source entry is exported, the executable runs, and only it imports the Slack SDKs. */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -25,6 +25,12 @@ describe('built slack-bridge', () => {
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+  })
+
+  it('ships the slack-watch Source entry exported by the package', () => {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { exports: Record<string, string> }
+    expect(pkg.exports['./slack-watch']).toBe('./lib/slack-watch.js')
+    expect(existsSync(join(lib, 'slack-watch.js'))).toBe(true)
   })
 
   it('keeps both Slack SDKs external and out of every other entry', () => {

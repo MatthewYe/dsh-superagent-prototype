@@ -376,6 +376,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/slack.ts` | The Slack kind and plugin entry, exported as `./slack-watch`: the config schema, fields and health entries; the socket starts in a later ticket |
+| `src/sources/slack-setup.ts` | The Slack bridge profile probe and schema the Slack kind's deployment slot resolves |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` executable, exported as `./slack-bridge`: one Socket Mode listener that prints Slack's frames as NDJSON, one Web API call, and the token setup; only this entry imports the Slack SDKs |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
@@ -400,7 +402,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/slack.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./slack-watch`. The bundle's `cordis.patch.yml` inserts the four plugins, with Feishu and Slack disabled.
 
 `src/sources/slack-bridge.ts` is the `slack-bridge` executable instead: `tsdown.config.ts` builds it as its own entry, `package.json` exposes it as the `slack-bridge` bin and `./slack-bridge`, and only that entry imports the Slack SDKs.
 
@@ -451,8 +453,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| `tests/slack-setup.spec.ts` | The Slack config schema and the `slack-bridge` probe against a fake executable: a missing bridge, unreadable answers, rejected tokens, and the resolved profile |
 | `tests/slack-bridge.spec.ts` | The `slack-bridge` commands offline: argv and usage, the Web API answers and 429 waits against a loopback stand-in, config precedence, the auth files and their modes, and Socket Mode framing, acks and reconnects |
-| `tests/slack-bridge-build.spec.ts` | The built `slack-bridge` executable: its shebang and mode, one `--version` run, and that no other entry imports the Slack SDKs |
+| `tests/slack-bridge-build.spec.ts` | The built Slack entries: the `slack-watch` Source export, the `slack-bridge` executable's shebang and mode, one `--version` run, and that no other entry imports the Slack SDKs |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 

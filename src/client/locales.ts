@@ -35,6 +35,9 @@ const TEXT = {
   'health.github': ['GitHub 来源', 'GitHub Source'],
   'health.feishu': ['飞书来源', 'Feishu Source'],
   'health.history:feishu': ['飞书补收', 'Feishu recovery'],
+  'source.slack': ['Slack', 'Slack'],
+  'health.slack': ['Slack 来源', 'Slack Source'],
+  'health.history:slack': ['Slack 补收', 'Slack recovery'],
   'health.runtime': ['dsh-superagent', 'dsh-superagent'],
   'health.models': ['模型服务', 'Model service'],
   'health.assessment': ['发给主 Session 的评估', 'Evals sent to the main Session'],
@@ -742,11 +745,17 @@ const TEXT = {
   'setup.feishuBotNotReady': ['应用 {app} 的机器人身份状态是 {status}；用 lark-cli 配置应用密钥。', SETUP_PROBLEMS.feishuBotNotReady[1]],
   'setup.feishuUserIdentity': ['机器人的 lark-cli 允许用户身份（strict mode 为 {mode}）；按 docs/006-deployment.md 给机器人一份 strict mode 为 bot 的单独配置。', SETUP_PROBLEMS.feishuUserIdentity[1]],
   'setup.feishuNoBot': ['飞书机器人接口没有返回机器人的 open_id。', SETUP_PROBLEMS.feishuNoBot[1]],
+  'setup.slackBridgeMissing': ['Slack 桥不可用。', SETUP_PROBLEMS.slackBridgeMissing[1]],
+  'setup.slackBridgeFailed': ['Slack 桥返回了 dsh-superagent 无法读取的应答。', SETUP_PROBLEMS.slackBridgeFailed[1]],
+  'setup.slackAuthFailed': ['Slack 拒绝了桥的 token：{error}。', SETUP_PROBLEMS.slackAuthFailed[1]],
   'healthCode.setupPending': ['等待部署检查', HEALTH_TEXT.setupPending],
   'healthCode.sourceOff': ['已关闭', HEALTH_TEXT.sourceOff],
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
+  'healthCode.slackBridgeUnset': ['来源已打开，还没有设置 slack-bridge', HEALTH_TEXT.slackBridgeUnset],
+  'healthCode.slackConnected': ['已连接到 {team}，机器人 @{bot}', HEALTH_TEXT.slackConnected],
+  'healthCode.slackFirstPass': ['正在等待第一次历史读取', HEALTH_TEXT.slackFirstPass],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT
 const language = (index: 0 | 1) => Object.fromEntries(Object.entries(TEXT).map(([key, pair]) => [key, pair[index]])) as Record<DshSuperagentKey, string>
