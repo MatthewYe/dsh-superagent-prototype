@@ -55,4 +55,11 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /**
+   * Slack Source: known conversations (`true` for direct messages), per-conversation history cursor, and resolved people
+   * (`name`, `bot`, `deleted`) cached while syncing the roster.
+   */
+  slack: { conversations: record<Record<string, boolean>>('slack-conversations'),
+    history: family<string, [conversation: string]>('slack-history:'),
+    people: record<Record<string, { name?: string; bot?: boolean; deleted?: boolean }>>('slack-people') },
 }
