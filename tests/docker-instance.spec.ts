@@ -70,6 +70,7 @@ esac`)
   executable(join(bin, 'op'), `case "$1" in
 whoami) exit "\${FAKE_OP_WHOAMI:-0}" ;;
 run)
+  [ "\${FAKE_OP_RUN:-0}" = 1 ] && exit 7
   shift
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
   [ "$#" -gt 0 ] && shift
@@ -255,9 +256,9 @@ describe('scripts/docker-instance', () => {
 
   it('fails with configuration exit code 2 when the model key cannot resolve', () => {
     const h = harness()
-    const result = run(h, 'start', { ...h.env, FAKE_OP_WHOAMI: '1' })
+    const result = run(h, 'start', { ...h.env, FAKE_OP_RUN: '1' })
     expect(result.status).toBe(2)
-    expect(result.stderr).toContain('1Password is not signed in')
+    expect(result.stderr).toContain('1Password could not resolve the model key')
     expect(existsSync(h.trace)).toBe(false)
 
     const missingOp = { ...h.env, SUPERAGENT_OP_BIN: join(h.root, 'no-op') }
@@ -283,6 +284,18 @@ describe('scripts/docker-instance', () => {
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('container: running')
     expect(status.stdout).toContain('panel: http://127.0.0.1:4082/?token=unit-token')
+  }, 20_000)
+
+  it('resolves the model key through op run even when op whoami reports no account', () => {
+    const h = harness()
+    // A signed-out `op whoami` is not authoritative: `op run` may still resolve the key from the
+    // environment file, as observed with the live 1Password account on 2026-11-12.
+    const result = run(h, 'start', { ...h.env, FAKE_OP_WHOAMI: '1' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('resolving it through op run')
+    expect(readFileSync(h.trace, 'utf8')).toContain('up --detach')
+    expect(readFileSync(join(h.artifacts, 'instances', 'unit', 'panel-url'), 'utf8').trim())
+      .toBe('http://127.0.0.1:4082/?token=unit-token')
   }, 20_000)
 
   it('stops the container, removes runtime credentials, and keeps volumes', () => {

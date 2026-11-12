@@ -114,6 +114,7 @@ usage: scripts/docker-instance <command>
   prepare   materialise credentials and import state without starting (used by tests)
   stop      remove the container and runtime credentials; keep the instance volumes
   status    print the container state and the last panel URL
+  logs      stream this service's logs; --follow and --tail N pass through to Compose
 
 Select the second instance with `scripts/docker-instance <command> livis` or
 SUPERAGENT_INSTANCE=livis (port 3083, livis profile); the default is the
@@ -366,8 +367,6 @@ require_model_key() {
   op=$(command -v "$op_bin" 2>/dev/null || true)
   [ -n "$op" ] \
     || config_error "DEEPSEEK_API_KEY is not set and the 1Password CLI (op) is not installed. Export DEEPSEEK_API_KEY or install op and create $op_env."
-  "$op" whoami >/dev/null 2>&1 \
-    || config_error "DEEPSEEK_API_KEY is not set and 1Password is not signed in. Run 'op signin', or export DEEPSEEK_API_KEY, then retry."
   [ -f "$op_env" ] \
     || config_error "DEEPSEEK_API_KEY is not set and $op_env does not exist. Create it with DEEPSEEK_API_KEY=op://... (see docs/006-deployment.md)."
 
@@ -469,6 +468,28 @@ stop() {
     "$instance" "$home_volume" "$volume"
 }
 
+logs() {
+  local containers container
+  # `compose logs` exits 0 without output when the project has never started, so
+  # require a real container first: a recorded or exported image tag alone must
+  # not make a stopped instance look readable.
+  containers=$("$docker_bin" ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}' 2>/dev/null) \
+    || runtime_error "could not list the containers of project $project; is the Docker daemon running?"
+  [ -n "$containers" ] \
+    || runtime_error "no container or recorded image for $instance; start it with: scripts/docker-instance start $instance"
+  # Compose interpolation needs an image even though `logs` never starts one.
+  if [ -z "$image" ] && [ -f "$runtime/image" ]; then
+    image=$(cat "$runtime/image")
+  fi
+  if [ -z "$image" ]; then
+    container=$(printf '%s\n' "$containers" | head -n 1)
+    image=$("$docker_bin" inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)
+  fi
+  [ -n "$image" ] \
+    || runtime_error "no container or recorded image for $instance; start it with: scripts/docker-instance start $instance"
+  compose logs "$@" "$service"
+}
+
 status() {
   local running='' url=''
   if [ -z "$image" ] && [ -f "$runtime/image" ]; then
@@ -498,6 +519,7 @@ case "$command" in
   prepare) prepare ;;
   stop) stop ;;
   status) status ;;
+  logs) logs "$@" ;;
   ''|-h|--help|help) usage; [ -z "$command" ] && exit 2 || exit 0 ;;
   *) usage; exit 2 ;;
 esac
