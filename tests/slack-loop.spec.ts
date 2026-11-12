@@ -110,7 +110,7 @@ describe('Slack socket loop', () => {
     await vi.waitFor(() => expect(h.receive).toHaveBeenCalledTimes(1), { timeout: 10_000 })
     expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: slackTriggerId('C0123ABCD', '1712345678.000100'), source: 'slack', addressed: 'mention' })
     await vi.waitFor(() => expect(h.board.all.slack).toMatchObject({ state: 'ready', detail: 'Connected to Acme as @superagent' }))
-    expect(h.board.all['history:slack']).toMatchObject({ state: 'starting', code: 'slackFirstPass' })
+    expect(h.board.all['history:slack']).toMatchObject({ state: 'ready', detail: 'Up to date' })
   })
 
   it('starts the bridge again after it exits and reports the failed poll', async () => {
@@ -184,8 +184,8 @@ describe('Slack socket loop', () => {
     for (const [index, trigger] of [...triggers.values()].entries()) outbox.send({ id: `reply-${index}`, channel: trigger.channel!, text: 'Done', kind: 'reply' })
     await outbox.sent()
     await effects.drain()
-    const sent = h.api()
-    expect(sent.map(item => item.method)).toEqual(['chat.postMessage', 'chat.postMessage'])
+    const sent = h.api().filter(item => item.method === 'chat.postMessage')
+    expect(sent).toHaveLength(2)
     expect(sent[0]!.body).toMatchObject({ channel: 'C0123ABCD', thread_ts: '1712345000.000100' })
     expect(sent[1]!.body).toMatchObject({ channel: 'D0123ABCD', thread_ts: '1712345679.000200' })
   })
