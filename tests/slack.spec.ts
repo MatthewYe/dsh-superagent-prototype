@@ -2,6 +2,12 @@
 import { describe, expect, it } from 'vitest'
 import { SlackConfigSchema, slackKind } from '../src/sources/slack.ts'
 import { slackAdmitted, slackScope } from '../src/sources/slack-trigger.ts'
+import { testDeployment } from './fixtures/deployment.ts'
+import { environmentOf } from '../src/app/execution-environment.ts'
+import { HealthBoard } from '../src/infra/health.ts'
+import { SettingsSchema } from '../src/policy.ts'
+import { SourceRegistry } from '../src/sources/registry.ts'
+import type { Trigger } from '../src/core/model.ts'
 
 const config = SlackConfigSchema.parse({
   chats: [{ conversationId: 'C0123ABCD', listen: 'mentions' }, { conversationId: 'C0456EFGH', listen: 'all' }],
@@ -32,6 +38,39 @@ describe('slackKind.scope', () => {
     expect(slackKind.channel!.allowed!({ conversation: 'C0999ZZZZ' }, { ...config, otherChats: 'none' })).toBe(false)
     expect(slackKind.channel!.allowed!({ conversation: 'D0123ABCD', direct: 'true' }, { ...config, directMessages: false })).toBe(false)
     expect(slackKind.channel!.words).toBe(100)
+  })
+})
+
+describe('slackKind.environment', () => {
+  it('declares the Slack bot and conversation variables, and fills them only for a Slack Ticket', () => {
+    const environment = slackKind.environment!
+    expect(environment.variables.map(variable => variable.key)).toEqual(['DSH_SUPERAGENT_SLACK_BOT', 'DSH_SUPERAGENT_SLACK_CONVERSATION'])
+    const deployment = testDeployment({ sources: { slack: { cli: '/opt/slack-bridge', teamId: 'T01234567', team: 'Acme',
+      botId: 'B01234567', userId: 'U01234567', name: 'Widgets Bot', url: 'https://acme.slack.com' } } })
+    const trigger = (source: string): Trigger => ({ id: 't1', source, threads: [], actor: { source, id: 'U01234567' }, human: true,
+      at: '2026-01-01T00:00:00.000Z', text: 'Fix it', meta: { conversation: 'C0456EFGH' } })
+    expect(environment.values({ deployment, config, trigger: trigger('slack') })).toEqual({
+      DSH_SUPERAGENT_SLACK_BOT: 'Widgets Bot', DSH_SUPERAGENT_SLACK_CONVERSATION: 'C0456EFGH' })
+    expect(environment.values({ deployment, config })).toEqual({ DSH_SUPERAGENT_SLACK_BOT: 'Widgets Bot', DSH_SUPERAGENT_SLACK_CONVERSATION: '' })
+    expect(environment.values({ deployment, config, trigger: trigger('github') }))
+      .toEqual({ DSH_SUPERAGENT_SLACK_BOT: 'Widgets Bot', DSH_SUPERAGENT_SLACK_CONVERSATION: '' })
+  })
+
+  it('is exposed only while the Slack Source is enabled', () => {
+    const on = SettingsSchema.parse({ sources: { slack: { enabled: true, config: {} } } })
+    const registry = new SourceRegistry(() => on, new HealthBoard())
+    registry.register(slackKind)
+    const deployment = testDeployment({ sources: { slack: { cli: '/opt/slack-bridge', teamId: 'T01234567', team: 'Acme',
+      botId: 'B01234567', userId: 'U01234567', name: 'Widgets Bot', url: 'https://acme.slack.com' } } })
+    const keys = environmentOf({ deployment, sources: registry, settings: on }).map(variable => variable.key)
+    expect(keys).toContain('DSH_SUPERAGENT_SLACK_BOT')
+    expect(keys).toContain('DSH_SUPERAGENT_SLACK_CONVERSATION')
+
+    const off = SettingsSchema.parse({ sources: { slack: { enabled: false, config: {} } } })
+    const disabled = new SourceRegistry(() => off, new HealthBoard())
+    disabled.register(slackKind)
+    expect(environmentOf({ deployment, sources: disabled, settings: off }).map(variable => variable.key))
+      .not.toContain('DSH_SUPERAGENT_SLACK_CONVERSATION')
   })
 })
 

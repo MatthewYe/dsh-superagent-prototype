@@ -274,16 +274,16 @@ Each model request binds the Session to the current prompt revision. The revisio
 - **Fixed refusals.** A refusal a person or an agent can cause is a `UserError(code, values)` from `USER_ERRORS` in `src/core/errors.ts`. The management API answers a `missing` code with 404 and the others with 400, and the panel words each code in its language. Setup problems are `SetupError` codes (`src/setup.ts`) and fixed health texts `HealthCode`s (`src/sources/host.ts`), worded the same way.
 ### Source-specific dependencies
 
-Some generic modules still refer directly to GitHub or Feishu:
+Some generic modules still refer directly to GitHub, Feishu or Slack:
 
-- Outbox applies the Feishu chat word limit.
-- `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
-- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
+- Outbox applies each chat Source's word limit: Feishu and Slack replies stay within 100 words.
+- `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`; a Slack Trigger carries its own permalink, so no extra read enriches it.
+- `src/app/resources.ts` reads the `feishu/`, `slack/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
 - Runtime sends `pullEndNotices` for merged or closed Tickets.
 - Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
 - MasterAssessor reads repository files with `readRepositoryPath`.
-- Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
-- Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
+- Sessions and Prompts register GitHub's built-in skill always, and Feishu's and Slack's only when their Source resolved a profile. Migration converts their schema-10 records.
+- Setup probes the `setup.fields` of every registered kind, so a Feishu or Slack account failure disables only that Source. Each Source receives its account setup problem through `SourceContext.problem`.
 
 
 ## Modules
@@ -326,9 +326,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
-| `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
-| `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
-| `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
+| `src/app/prompts.ts` | Prompts, `builtInParts` (including the `skill/feishu`, `skill/github` and `skill/slack` parts), the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
+| `src/app/context.ts` | The built-in prompt text, read from `prompts/`, the bundled Source skills and the transcript entries Sessions read |
+| `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled Feishu, GitHub and Slack skills |
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
@@ -354,7 +354,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
-| `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/environment.ts` | The agent's process environment: command shims (`gh`, `lark-cli`, `slack-bridge` and blocked commands), the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -447,10 +447,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
-| `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
+| `tests/prompts.spec.ts` | Prompt validation, assembly and versions, and the built-in Source skills |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
-| `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
+| `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment and its `gh`, `lark-cli` and `slack-bridge` shims, the plugin entry |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -462,7 +462,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/slack-trigger.spec.ts` | Slack event translation: mrkdwn tokens, app mentions and DMs, deterministic ids, thread roots, other bots, and dropped self-echo, edits and hidden messages |
 | `tests/slack-channel.spec.ts` | The Slack Channel through a fake bridge: threaded `chat.postMessage` argv, no client ids or blocks, gone and retryable errors, health outcomes, archive links, and the bridge accessor |
 | `tests/slack-read.spec.ts` | Slack thread-context reads through a fake bridge: the five resources, oldest-first replies, cursor paging, the top-level neighbour fallback, Slack error surfaces, Trigger terms and parent links, and the slack/ resource route |
-| `tests/slack.spec.ts` | The Slack kind's scope rows and admission: listed and unlisted conversations, DMs, the reply limit, and `channel.allowed` agreeing with `scope` |
+| `tests/slack.spec.ts` | The Slack kind's scope rows and admission (listed and unlisted conversations, DMs, the reply limit, `channel.allowed` agreeing with `scope`) and its worker environment variables |
 | `tests/slack-loop.spec.ts` | The Slack socket end to end through a fake bridge: a mention and a DM become Triggers and one Ticket each, unaddressed unlisted messages are dropped, and app, token, rate-limit and team failures report health |
 | `tests/slack-backfill.spec.ts` | Slack history recovery through a fake bridge: first sight reads nothing, the 5-second overlap and 14-day floor, oldest-first replay, active-thread replies, a failed pass keeping its cursor, rate limits, idempotent redelivery, joining public conversations, and conversation names |
 | `tests/slack-policy.spec.ts` | The Slack Policy and roster sync through a fake bridge: IDs and schema, member order and refreshed names, the people cache, bots and deleted users, an incomplete member list, and label refresh |
@@ -587,7 +587,7 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
-| `feishu/<trigger id>/…`, `github/…` | Original Source records, described in the Source skills |
+| `feishu/<trigger id>/…`, `slack/<trigger id>/…`, `github/…` | Original Source records, described in the Source skills |
 
 Ticket Threads are marked `context` for context-only follows and `bound` for Source bindings. Assignment pages are newest first and include report previews. Continue lists with `next_offset`. `/input/<id>` accepts an Input's name or id. `settings` includes small blocks in full and summarizes Policy and Source blocks.
 

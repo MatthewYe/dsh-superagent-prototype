@@ -8,7 +8,7 @@ import { sendSlack, slackLink } from './slack-channel.ts'
 import { slackThreadContext } from './slack-read.ts'
 import { refreshConversationNames } from './slack-history.ts'
 import { SlackPolicySchema, syncSlackRoster } from './slack-policy.ts'
-import { slackRepliesTo, slackScope, slackTerms } from './slack-trigger.ts'
+import { SOURCE, slackRepliesTo, slackScope, slackTerms } from './slack-trigger.ts'
 import { runSlack } from './slack-loop.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -105,6 +105,16 @@ export const slackKind: SourceKind<SlackConfig> = {
       detail: part => `Synced ${part.allowed.length} people`,
       run: syncSlackRoster,
     },
+  },
+  environment: {
+    variables: [
+      { key: 'DSH_SUPERAGENT_SLACK_BOT', description: { zh: 'Slack 机器人；slack-bridge 以它行事', en: 'The Slack bot; slack-bridge acts as it' } },
+      { key: 'DSH_SUPERAGENT_SLACK_CONVERSATION', description: { zh: '接下工单的 Slack 会话；工单不是从 Slack 来的时为空', en: 'The Slack conversation that started the ticket; empty when the ticket did not start on Slack' } },
+    ],
+    values: ({ deployment, trigger }) => ({
+      DSH_SUPERAGENT_SLACK_BOT: (() => { const profile = slackProfile(deployment); return profile ? profile.name || profile.botId : '' })(),
+      DSH_SUPERAGENT_SLACK_CONVERSATION: trigger?.source === SOURCE ? String(trigger.meta.conversation ?? '') : '',
+    }),
   },
   threadContext: slackThreadContext,
   find: query => ({ threads: [], terms: slackTerms(query) }),
