@@ -51,7 +51,8 @@ const OkSchema = z.looseObject({ ok: z.boolean(), error: z.string().optional() }
 type SlackMessage = z.infer<typeof MessageSchema>
 type SlackConversation = { id: string; name?: string; is_member?: boolean; is_private?: boolean; is_archived?: boolean }
 
-const iso = (milliseconds: number): string => new Date(milliseconds).toISOString()
+/** Slack history bounds are epoch-second stamps, not ISO times. */
+const slackStamp = (milliseconds: number): string => (milliseconds / 1000).toFixed(6)
 /** Slack timestamps are epoch seconds with a fractional part; `Date.parse` cannot read them. */
 const slackTime = (ts: string): number => Number(ts) * 1000
 const rateLimited = (error: unknown): boolean => /rate.?limit/i.test(String(error))
@@ -64,7 +65,7 @@ async function historyPages(ctx: SourceContext, conversation: string, oldest: nu
   let cursor: string | undefined
   for (;;) {
     if (signal.aborted) throw signal.reason
-    const body: Record<string, unknown> = { channel: conversation, oldest: iso(oldest), latest: iso(latest), limit: PAGE, inclusive: true }
+    const body: Record<string, unknown> = { channel: conversation, oldest: slackStamp(oldest), latest: slackStamp(latest), limit: PAGE, inclusive: true }
     if (cursor) body.cursor = cursor
     const page = HistorySchema.parse(await commands.slackJson(['api', 'conversations.history', JSON.stringify(body)], HistorySchema))
     if (!page.ok) throw new Error(`conversations.history failed: ${page.error ?? 'unknown error'}`)
@@ -84,7 +85,7 @@ async function replyPages(ctx: SourceContext, conversation: string, root: string
   let cursor: string | undefined
   for (;;) {
     if (signal.aborted) throw signal.reason
-    const body: Record<string, unknown> = { channel: conversation, ts: root, latest: iso(latest), limit: PAGE }
+    const body: Record<string, unknown> = { channel: conversation, ts: root, latest: slackStamp(latest), limit: PAGE }
     if (cursor) body.cursor = cursor
     const page = HistorySchema.parse(await commands.slackJson(['api', 'conversations.replies', JSON.stringify(body)], HistorySchema))
     if (!page.ok) throw new Error(`conversations.replies failed: ${page.error ?? 'unknown error'}`)
