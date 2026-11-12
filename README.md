@@ -15,7 +15,17 @@ It is also a way of working with an agent: **take as little human attention as p
 
 ## Setup
 
-Setup has many steps, so an agent does it with you. Ask your coding agent:
+Docker is the primary deployment path. With Docker running:
+
+```sh
+export SUPERAGENT_IMAGE="$(scripts/docker-build | tail -n 1)"
+docker compose up --detach
+docker compose logs superagent
+```
+
+Open the panel URL printed in the log and choose **Superagent** in the sidebar. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials and the current limits. The image and Compose stack currently run the `superagent` instance only; the `livis` instance and real credential provisioning are follow-ups.
+
+To install the product into a DeepSeek Harness profile on the host instead, or to have an agent walk through that installation with you, ask your coding agent:
 
 > Read SETUP.md in this repository and set up dsh-superagent with me.
 
@@ -31,9 +41,11 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [003 Execution](docs/003-execution.md)
 - [004 Prompts](docs/004-prompts.md)
 - [005 Panel](docs/005-panel.md)
-- [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
+- [006 Deployment](docs/006-deployment.md): Docker-first build, run, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+
+The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md), and the Docker decision is recorded in [docs/adr/0001-docker-deployment.md](docs/adr/0001-docker-deployment.md).
 
 ## Development
 

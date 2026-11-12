@@ -10,7 +10,8 @@ This repository is a personal fork of
 
 | Date | Area | Change | Commit |
 |------|------|--------|--------|
-| 2026-11-12 | repo | Marked this repository as a personal fork and added this customization log | (this commit) |
+| 2026-11-12 | repo | Marked this repository as a personal fork and added this customization log | c4b0be8 |
+| 2026-11-12 | docs | Documented Docker as the primary deployment, added the deployment glossary and the Docker deployment ADR (issue #6) | (this commit) |
 
 ## Syncing with upstream
 
