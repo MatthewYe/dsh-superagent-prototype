@@ -31,6 +31,16 @@ if [ ! -f "$HOME_DIR/profiles/superagent/package.json" ]; then
   cp -a "$TEMPLATE"/. "$HOME_DIR"/
 fi
 
+# Import the agent's DSH credential store once, from the read-only staging mount.
+# It is copied rather than mounted because DSH rewrites the file when it refreshes
+# credentials, and the recursive chown below must not touch a read-only mount.
+if [ -f "${SUPERAGENT_CREDENTIALS_SOURCE:-/run/superagent/credentials.yaml}" ] \
+    && [ ! -f "$HOME_DIR/.credentials.yaml" ]; then
+  install -m 0600 -o "$OPERATOR_UID" -g "$OPERATOR_GID" \
+    "${SUPERAGENT_CREDENTIALS_SOURCE:-/run/superagent/credentials.yaml}" "$HOME_DIR/.credentials.yaml"
+  echo "superagent-entrypoint: imported DSH credentials from the staging mount" >&2
+fi
+
 # The template's plugin link was baked at a different depth; keep it absolute.
 mkdir -p "$HOME_DIR/profiles/superagent/node_modules"
 ln -sfn "$PRODUCT" "$HOME_DIR/profiles/superagent/node_modules/dsh-superagent"

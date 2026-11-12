@@ -86,6 +86,40 @@ The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harnes
 
 Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its `cordis.patch.yml`, including machine configuration. Do not use it for upgrades.
 
+## Docker deployment
+
+[compose.yaml](../compose.yaml) runs one dsh-superagent instance in a container built from [Dockerfile](../Dockerfile). The image contains the product, the pinned DeepSeek Harness version and a `gh-agent` wrapper at `/Users/matthewye/.local/bin/gh-agent`; it contains no credential or model key.
+
+Build the image with `scripts/docker-build` and export the tag it prints. Then run one instance through the host wrapper:
+
+```sh
+export SUPERAGENT_IMAGE=dsh-superagent:<commit>-dsh-<version>
+scripts/docker-instance start
+scripts/docker-instance status
+scripts/docker-instance stop
+```
+
+`start` needs the agent's GitHub token in the macOS Keychain under service `gh:github.com` and account `matthewye-agent`, and the model key in `DEEPSEEK_API_KEY` or in the 1Password references in `~/.config/op/llm.env`. When the variable is absent it re-executes itself under `op run --env-file`; a locked or signed-out 1Password is a configuration error. The missing model key is never written to the repository, the image or the compose file: it is passed only as the compose process environment for the running container.
+
+The wrapper writes per-instance runtime files under `.artifacts/instances/<instance>/` (mode 0700):
+
+- `hosts.yml` (0600) with the Keychain token, mounted read-only into the container at the path the imported git configuration expects. It is removed by `stop`.
+- `credentials.yaml` (0600), a copy of `~/.dsh/.credentials.yaml`. The entrypoint copies it to the container DSH home as `.credentials.yaml` (0600) on first start, so the image never contains it.
+- `compose.runtime.yaml`, a compose override with those two read-only bind mounts and the transient model key.
+- `panel-url` (0600), the per-boot `?token=` panel URL scraped from the container log; `status` prints it.
+
+The host state directory, `~/.dsh/state/superagent` by default, is imported once into the instance's state volume after a SQLite `wal_checkpoint(TRUNCATE)`; a marker makes later starts skip the import. The host copy is hashed before and after the copy and must not change. Use a throwaway or sanitised copy for tests: clear the GitHub repository and Sources, keep the deployment paused, and remove any real Tickets and Threads before importing.
+
+The wrapper exits 2 for configuration errors (missing Keychain token, missing model key, unavailable image), 1 for runtime failures, and 0 on success. Override defaults with `SUPERAGENT_INSTANCE`, `SUPERAGENT_PROJECT`, `SUPERAGENT_PUBLISH_PORT`, `SUPERAGENT_STATE_DIR`, `SUPERAGENT_DSH_HOME` and `SUPERAGENT_ARTIFACTS_DIR`.
+
+The opt-in Docker tests run with:
+
+```sh
+DSH_DOCKER_E2E=1 pnpm exec vitest run tests/docker-deployment.spec.ts tests/docker-credentials.spec.ts
+```
+
+They use throwaway projects, volumes and ports; the credentials test needs a readable Keychain item and skips only the real-model-reply assertion when the model key cannot be resolved, reporting why.
+
 ## Machine configuration
 
 Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
