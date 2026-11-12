@@ -431,7 +431,7 @@ describe('real Web API wiring', () => {
     }, async apiUrl => {
       const h = harness({ env, webApi: token => createWebApi(token, { apiUrl }) })
       expect(await main(['api', 'chat.postMessage', '{"channel":"C1"}'], h.io, h.deps)).toBe(0)
-      expect(h.stdout).toEqual([JSON.stringify({ ok: true, ts: '1700000000.000001' })])
+      expect(h.stdout).toEqual([JSON.stringify({ ok: true, ts: '1700000000.000001', response_metadata: {} })])
       expect(h.stderr).toEqual([])
       expect(h.sleeps).toEqual([0])
     })
@@ -444,7 +444,7 @@ describe('real Web API wiring', () => {
     }, async apiUrl => {
       const h = harness({ env, webApi: token => createWebApi(token, { apiUrl }) })
       expect(await main(['api', 'auth.test', '{}'], h.io, h.deps)).toBe(0)
-      expect(h.stdout).toEqual([JSON.stringify({ ok: false, error: 'invalid_auth' })])
+      expect(h.stdout).toEqual([JSON.stringify({ ok: false, error: 'invalid_auth', response_metadata: {} })])
       expect(h.stderr).toEqual([])
     })
   })
