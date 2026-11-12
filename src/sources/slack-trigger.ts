@@ -72,6 +72,37 @@ export const slackTriggerId = (conversation: string, ts: string): string => key(
 /** Thread id in the Feishu convention `<conversation>:<root ts>`; a top-level message is its own root. */
 export const slackThreadId = (conversation: string, threadTs: string | undefined, ts: string): string => `${conversation}:${threadTs ?? ts}`
 
+/** The Slack message coordinates a read is anchored to; `threadTs` is absent for a top-level message. */
+export interface SlackRef { triggerId: string; conversation: string; ts: string; threadTs?: string }
+
+/**
+ * Reads the coordinates retained on an accepted Trigger from its Channel address and meta.
+ * Returns undefined for a Trigger that did not come from Slack.
+ */
+export function slackRef(trigger: Trigger): SlackRef | undefined {
+  const address = trigger.channel?.address ?? {}
+  const conversation = typeof address.conversation === 'string' ? address.conversation : typeof trigger.meta.conversation === 'string' ? trigger.meta.conversation : ''
+  const ts = typeof address.ts === 'string' ? address.ts : typeof trigger.meta.ts === 'string' ? trigger.meta.ts : ''
+  if (!conversation || !ts) return undefined
+  const threadTs = typeof trigger.meta.threadTs === 'string' ? trigger.meta.threadTs
+    : typeof address.thread_ts === 'string' ? address.thread_ts : undefined
+  return { triggerId: trigger.id, conversation, ts, ...threadTs ? { threadTs } : {} }
+}
+
+/** The parent Trigger of a reply, in this Source's id convention; a top-level message has none. */
+export function slackRepliesTo(trigger: Trigger): string | undefined {
+  const ref = slackRef(trigger)
+  return ref?.threadTs && ref.threadTs !== ref.ts ? slackTriggerId(ref.conversation, ref.threadTs) : undefined
+}
+
+const archiveLink = /https:\/\/[^\s/]+\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/g
+
+/** Turns Slack archive permalinks in a search query into this Source's Trigger terms, deduplicated. */
+export function slackTerms(query: string): string[] {
+  return [...new Set([...query.matchAll(archiveLink)]
+    .map(([, conversation = '', seconds = '', micros = '']) => slackTriggerId(conversation, `${seconds}.${micros}`)))]
+}
+
 /** Builds a reply address; an in-thread message keeps `thread_ts` so the reply lands under the root. */
 export const slackChannel = (conversation: string, ts: string, options: { threadTs?: string; direct?: boolean } = {}): ChannelRef => ({
   source: SOURCE,
