@@ -1,0 +1,26 @@
+#!/bin/bash
+# A stand-in for the agent's GitHub CLI used by the opt-in Docker end-to-end test.
+#
+# Ticket #2 exercises the container plumbing, not real credentials: it configures
+# the deployment through the management API with this script as the agent CLI and
+# a repository that does not exist. Every call the deployment makes is answered
+# locally so setup, the worker environment, and one polling round can succeed
+# without a network account. Ticket #3 replaces this fixture with the real
+# Keychain materialisation path.
+set -u
+case "$1 $2" in
+  'api user')
+    printf '{"login":"e2e-agent","id":1234567}\n'
+    ;;
+  'api repos/acme/widgets')
+    printf '{"name":"acme/widgets","push":true}\n'
+    ;;
+  'api repos/acme/widgets/notifications'*)
+    # The notifier passes --include, so the response carries headers and an empty list.
+    printf 'HTTP/2.0 200 OK\r\nx-poll-interval: 60\r\n\r\n[]\n'
+    ;;
+  *)
+    printf 'gh-stub: unexpected invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac

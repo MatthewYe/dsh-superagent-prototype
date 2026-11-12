@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Build the product image from this working tree (ticket #2).
+#
+# The tag encodes the product commit and the pinned DSH CLI version; ticket #3
+# appends the Livis plugin commit to the same convention.
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+dsh_version=${DSH_VERSION:-0.2.1-rc.3}
+commit=$(git -C "$root" rev-parse --short=12 HEAD)
+tag="dsh-superagent:${commit}-dsh-${dsh_version}"
+image=${SUPERAGENT_IMAGE:-$tag}
+
+docker build \
+  --build-arg "DSH_VERSION=${dsh_version}" \
+  --build-arg "PRODUCT_COMMIT=${commit}" \
+  --build-arg "IMAGE_TAG=${image}" \
+  --tag "$image" \
+  --file "$root/Dockerfile" \
+  "$root"
+
+printf '%s\n' "$image"

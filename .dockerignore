@@ -1,0 +1,14 @@
+# Keep the image build context small and free of credentials.
+.git
+.gitignore
+node_modules
+lib
+.artifacts
+.worktrees
+coverage
+tests
+docs
+.env
+.env.*
+*.log
+.DS_Store

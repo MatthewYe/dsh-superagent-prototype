@@ -1,0 +1,34 @@
+# One container, one DSH instance (ticket #2).
+#
+# The image is built locally by scripts/docker-build; the tag encodes the product
+# commit and the pinned DSH CLI version. The publish port defaults to 3082 and is
+# bound to loopback only: DSH itself listens on 127.0.0.1:3082 inside the
+# container, and the in-container relay on 13082 is the sole wildcard listener.
+services:
+  superagent:
+    image: ${SUPERAGENT_IMAGE:?build the image with scripts/docker-build first, or set SUPERAGENT_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DSH_VERSION: ${DSH_VERSION:-0.2.1-rc.3}
+        PRODUCT_COMMIT: ${PRODUCT_COMMIT:-unknown}
+        IMAGE_TAG: ${SUPERAGENT_IMAGE:-dsh-superagent:local}
+    ports:
+      - "127.0.0.1:${SUPERAGENT_PUBLISH_PORT:-3082}:13082"
+    volumes:
+      # The profile home is private to the instance and writable by uid 501.
+      - superagent-home:/data/dsh
+      # The live instance's absolute state path, kept unchanged inside the image.
+      - superagent-state:/Users/matthewye/.dsh/state/superagent
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/superagent-healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  superagent-home:
+  superagent-state:
