@@ -152,9 +152,9 @@ export function createWebApi(token: string, options: { apiUrl?: string } = {}): 
   return {
     call: async (method, args) => {
       try {
-        return withoutEmptyMetadata(await client.apiCall(method, args) as SlackApiResponse)
+        return withoutEmptyMetadata(checkedResponse(await client.apiCall(method, args)))
       } catch (error) {
-        if (error instanceof WebAPIPlatformError) return withoutEmptyMetadata(error.data as unknown as SlackApiResponse)
+        if (error instanceof WebAPIPlatformError) return withoutEmptyMetadata(checkedResponse(error.data))
         if (error instanceof WebAPIRateLimitedError) throw new SlackRateLimitedError(error.retryAfter)
         if (error instanceof WebAPIHTTPError) throw new SlackTransportError(describeHttpError(error))
         if (error instanceof WebAPIRequestError) throw new SlackTransportError(describeRequestError(error))
@@ -538,6 +538,19 @@ function describeRequestError(error: WebAPIRequestError): string {
 
 function slackError(response: SlackApiResponse): string {
   return typeof response.error === 'string' ? response.error : 'unknown_error'
+}
+
+/** Slack answers with an object carrying `ok`; anything else is a parse failure, not a Slack answer. */
+function checkedResponse(value: unknown): SlackApiResponse {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SlackTransportError('Slack returned a response that could not be parsed')
+  }
+  const response = value as SlackApiResponse
+  if (typeof response.ok !== 'boolean') throw new SlackTransportError('Slack returned a response that could not be parsed')
+  if (!response.ok && (typeof response.error !== 'string' || !/^[a-z][a-z0-9_]*$/.test(response.error))) {
+    throw new SlackTransportError('Slack returned an error that could not be parsed')
+  }
+  return response
 }
 
 /** The SDK adds an empty response_metadata to every answer; the bridge prints Slack's fields only. */

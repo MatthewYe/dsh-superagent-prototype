@@ -448,4 +448,16 @@ describe('real Web API wiring', () => {
       expect(h.stderr).toEqual([])
     })
   })
+
+  it('exits 1 without JSON when the answer is not a Slack response', async () => {
+    await withStandInHttp(response => {
+      response.writeHead(200, { 'Content-Type': 'text/plain' })
+      response.end('not a Slack answer')
+    }, async apiUrl => {
+      const h = harness({ env, webApi: token => createWebApi(token, { apiUrl }) })
+      expect(await main(['api', 'auth.test', '{}'], h.io, h.deps)).toBe(1)
+      expect(h.stdout).toEqual([])
+      expect(h.stderr.join('\n')).toMatch(/could not reach slack/i)
+    })
+  })
 })
