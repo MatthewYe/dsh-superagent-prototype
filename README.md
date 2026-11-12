@@ -19,11 +19,11 @@ Docker is the primary deployment path. With Docker running:
 
 ```sh
 export SUPERAGENT_IMAGE="$(scripts/docker-build | tail -n 1)"
-docker compose up --detach
+docker compose up --detach superagent
 docker compose logs superagent
 ```
 
-Open the panel URL printed in the log and choose **Superagent** in the sidebar. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials and the current limits. The image and Compose stack currently run the `superagent` instance only; the `livis` instance and real credential provisioning are follow-ups.
+Open the panel URL printed in the log and choose **Superagent** in the sidebar. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials and the current limits. One image serves both instances: `docker compose up --detach livis` (or `scripts/docker-instance start livis`) runs the `livis` profile with its plugin on port 3083. The operator wrapper (#5) and the live relay-identity cutover (#7) remain follow-ups.
 
 To install the product into a DeepSeek Harness profile on the host instead, or to have an agent walk through that installation with you, ask your coding agent:
 

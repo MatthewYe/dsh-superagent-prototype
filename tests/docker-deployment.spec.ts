@@ -144,7 +144,7 @@ describe.skipIf(!ENABLED)('docker deployment', () => {
     check(image.includes(commit), `image tag ${image} does not encode the product commit ${commit}`)
     check(image.includes('dsh-0.2.1-rc.3'), `image tag ${image} does not encode the DSH CLI version`)
 
-    compose('up', '--detach')
+    compose('up', '--detach', 'superagent')
     await waitFor('the container to exist', async () => compose('ps', '-q', 'superagent').trim().length > 0)
     cid = container()
   }, 40 * 60_000)

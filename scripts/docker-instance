@@ -1,8 +1,9 @@
 #!/bin/bash
-# Start, stop, and inspect one Docker-backed dsh-superagent instance (ticket #3).
+# Start, stop, and inspect one Docker-backed dsh-superagent instance (ticket #3),
+# including the second `livis` instance (ticket #4).
 #
-# The container image is stateless. This host-side wrapper materialises the
-# runtime credentials the container must not bake in:
+# The image is stateless. This host-side wrapper materialises the runtime
+# credentials the container must not bake in:
 #
 #   * the agent's GitHub token, resolved through `gh auth token` (or the macOS
 #     Keychain as a fallback) and validated with `gh api user` before it is
@@ -10,13 +11,22 @@
 #   * the host's DSH credential store, staged read-only for the entrypoint to
 #     copy into the private DSH home on first start;
 #   * the model key, resolved from the host environment or 1Password and passed
-#     only as the compose process environment.
+#     only as the compose process environment. The livis profile authenticates
+#     through the DSH credential store instead, so it does not need the key.
 #
 # It also imports the host state directory once, after a SQLite WAL checkpoint,
 # and writes the per-boot panel URL under .artifacts/.
 #
+# Instance selection: SUPERAGENT_INSTANCE (default `superagent`) picks the default
+# project, profile/service, publish port, state directory and volume suffix:
+# `livis` selects the livis service on 127.0.0.1:3083 with livis-home /
+# livis-state volumes. Any other name keeps the superagent defaults, which is what
+# the unit tests exercise. Every part can still be overridden with the
+# SUPERAGENT_* variables.
+#
 # Exit codes: 0 normal, 1 runtime failure, 2 configuration error (missing or
-# unvalidated GitHub token, missing model key, missing image).
+# unvalidated GitHub token, missing DSH credential store, missing model key,
+# missing image).
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -25,24 +35,58 @@ script=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0
 command=${1:-}
 if [ "$#" -gt 0 ]; then shift; fi
 
-instance=${SUPERAGENT_INSTANCE:-superagent}
+# The instance can be named as the second argument (`start livis`) or through
+# SUPERAGENT_INSTANCE. The argument wins so one exported environment cannot
+# silently redirect a command aimed at a named instance.
+instance_arg=${1:-}
+if [ "$#" -gt 0 ]; then shift; fi
+instance=${instance_arg:-${SUPERAGENT_INSTANCE:-superagent}}
+case "$instance" in
+  livis)
+    default_profile=livis
+    default_service=livis
+    default_publish=3083
+    default_state=$HOME/.dsh/state/livis
+    default_home_suffix=livis-home
+    default_volume_suffix=livis-state
+    ;;
+  *)
+    default_profile=superagent
+    default_service=superagent
+    default_publish=3082
+    default_state=$HOME/.dsh/state/superagent
+    default_home_suffix=superagent-home
+    default_volume_suffix=superagent-state
+    ;;
+esac
+
 project=${SUPERAGENT_PROJECT:-dsh-superagent-$instance}
+profile=${SUPERAGENT_PROFILE:-$default_profile}
+service=${SUPERAGENT_SERVICE:-$default_service}
 image=${SUPERAGENT_IMAGE:-}
-publish=${SUPERAGENT_PUBLISH_PORT:-3082}
-state_dir=${SUPERAGENT_STATE_DIR:-$HOME/.dsh/state/superagent}
+publish=${SUPERAGENT_PUBLISH_PORT:-$default_publish}
+state_dir=${SUPERAGENT_STATE_DIR:-$default_state}
 dsh_home=${SUPERAGENT_DSH_HOME:-$HOME/.dsh}
 gh_service=${SUPERAGENT_GH_KEYCHAIN_SERVICE:-gh:github.com}
 gh_account=${SUPERAGENT_GH_KEYCHAIN_ACCOUNT:-matthewye-agent}
 gh_bin=${SUPERAGENT_GH_BIN:-gh}
 gh_config_dir=${SUPERAGENT_GH_CONFIG_DIR:-$HOME/.config/gh-agent}
 op_env=${SUPERAGENT_OP_ENV_FILE:-$HOME/.config/op/llm.env}
+livis_dir=${LIVIS_DIR:-/Users/matthewye/Documents/WorkSpace/dsh-livis}
 artifacts=${SUPERAGENT_ARTIFACTS_DIR:-$root/.artifacts}
 runtime=$artifacts/instances/$instance
-volume=${project}_superagent-state
+volume=${project}_${default_volume_suffix}
+home_volume=${project}_${default_home_suffix}
 security_bin=${SUPERAGENT_SECURITY_BIN:-security}
 docker_bin=${SUPERAGENT_DOCKER_BIN:-docker}
 op_bin=${SUPERAGENT_OP_BIN:-op}
 validated_login=''
+
+# The livis profile signs in through the DSH account credential record; only the
+# superagent profile needs DEEPSEEK_API_KEY at start.
+requires_model_key() {
+  [ "$profile" != livis ]
+}
 
 usage() {
   cat >&2 <<'EOF'
@@ -52,6 +96,10 @@ usage: scripts/docker-instance <command>
   prepare   materialise credentials and import state without starting (used by tests)
   stop      remove the container and runtime credentials; keep the instance volumes
   status    print the container state and the last panel URL
+
+Select the second instance with `scripts/docker-instance <command> livis` or
+SUPERAGENT_INSTANCE=livis (port 3083, livis profile); the default is the
+superagent instance on port 3082.
 EOF
 }
 
@@ -78,7 +126,12 @@ compose() {
   if [ -f "$runtime/compose.runtime.yaml" ]; then
     files+=(-f "$runtime/compose.runtime.yaml")
   fi
-  SUPERAGENT_IMAGE="$image" SUPERAGENT_PUBLISH_PORT="$publish" DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
+  SUPERAGENT_IMAGE="$image" \
+    SUPERAGENT_PUBLISH_PORT="$publish" \
+    LIVIS_PUBLISH_PORT="$publish" \
+    LIVIS_DIR="$livis_dir" \
+    LIVIS_COMMIT="${LIVIS_COMMIT:-unknown}" \
+    DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
     "$docker_bin" compose "${files[@]}" --project-directory "$root" -p "$project" "$@"
 }
 
@@ -184,9 +237,11 @@ write_runtime_credentials() {
 write_override() {
   {
     printf 'services:\n'
-    printf '  superagent:\n'
-    printf '    environment:\n'
-    printf '      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"\n'
+    printf '  %s:\n' "$service"
+    if requires_model_key; then
+      printf '    environment:\n'
+      printf '      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"\n'
+    fi
     printf '    volumes:\n'
     printf '      - type: bind\n'
     printf '        source: "%s"\n' "$runtime/hosts.yml"
@@ -206,18 +261,19 @@ checkpoint_state() {
   local db=$state_dir/orchestrator.sqlite
   [ -d "$state_dir" ] || return 0
   [ -f "$db" ] || return 0
-  python3 - "$db" <<'PY'
+  python3 - "$db" "$profile" <<'PY'
 import sqlite3
 import sys
 
 path = sys.argv[1]
+profile = sys.argv[2]
 connection = sqlite3.connect(path, timeout=30)
 try:
     busy, _log, _checkpointed = connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
 finally:
     connection.close()
 if busy:
-    raise SystemExit(f'orchestrator.sqlite is busy; stop the host superagent instance before importing it')
+    raise SystemExit(f'orchestrator.sqlite is busy; stop the host {profile} instance before importing it')
 PY
 }
 
@@ -235,7 +291,7 @@ ensure_volume() {
   if ! "$docker_bin" volume inspect "$volume" >/dev/null 2>&1; then
     "$docker_bin" volume create \
       --label "com.docker.compose.project=$project" \
-      --label "com.docker.compose.volume=superagent-state" \
+      --label "com.docker.compose.volume=$default_volume_suffix" \
       "$volume" >/dev/null
   fi
 }
@@ -272,12 +328,15 @@ import_state() {
   fi
   after=$(state_hash)
   if [ "$before" != "$after" ]; then
-    runtime_error "the host state at $state_dir changed while it was being imported; stop the host superagent instance and try again."
+    runtime_error "the host state at $state_dir changed while it was being imported; stop the host $profile instance and try again."
   fi
   printf 'docker-instance: imported %s into volume %s once (sha256 %s).\n' "$state_dir" "$volume" "$before" >&2
 }
 
 require_model_key() {
+  if ! requires_model_key; then
+    return 0
+  fi
   if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
     return 0
   fi
@@ -307,6 +366,9 @@ require_model_key() {
 
 prepare() {
   require_image
+  if ! requires_model_key && [ ! -f "$dsh_home/.credentials.yaml" ]; then
+    config_error "the livis instance needs the host DSH credential store at $dsh_home/.credentials.yaml (deepseek-account). Sign in on the host first, or set SUPERAGENT_DSH_HOME."
+  fi
   local token
   token=$(read_github_token)
   write_runtime_credentials "$token"
@@ -317,7 +379,7 @@ prepare() {
 wait_for_panel_url() {
   local token line deadline=$((SECONDS + 180))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    token=$(compose logs --no-color --no-log-prefix superagent 2>/dev/null \
+    token=$(compose logs --no-color --no-log-prefix "$service" 2>/dev/null \
       | grep -o 'token=[A-Za-z0-9_-]*' | tail -n 1 || true)
     if [ -n "$token" ]; then
       printf 'http://127.0.0.1:%s/?%s\n' "$publish" "$token"
@@ -331,10 +393,10 @@ wait_for_panel_url() {
 start() {
   require_model_key
   prepare
-  compose up --detach
+  compose up --detach "$service"
   local url
   if ! url=$(wait_for_panel_url); then
-    runtime_error "the container started but no 'dsh web: ...?token=' log line appeared within 180s. Inspect it with: docker compose -p $project logs superagent"
+    runtime_error "the container started but no 'dsh web: ...?token=' log line appeared within 180s. Inspect it with: docker compose -p $project logs $service"
   fi
   umask 077
   printf '%s\n' "$url" > "$runtime/panel-url"
@@ -384,8 +446,8 @@ stop() {
     runtime_error "could not stop the project $project with docker compose."
   fi
   remove_runtime_dir
-  printf 'docker-instance: stopped %s. Volumes %s_superagent-home and %s were kept.\n' \
-    "$instance" "$project" "$volume"
+  printf 'docker-instance: stopped %s. Volumes %s and %s were kept.\n' \
+    "$instance" "$home_volume" "$volume"
 }
 
 status() {
@@ -394,7 +456,7 @@ status() {
     image=$(cat "$runtime/image")
   fi
   if [ -n "$image" ]; then
-    running=$(compose ps --status running -q superagent 2>/dev/null | head -n 1 || true)
+    running=$(compose ps --status running -q "$service" 2>/dev/null | head -n 1 || true)
   fi
   if [ -f "$runtime/panel-url" ]; then
     url=$(cat "$runtime/panel-url")

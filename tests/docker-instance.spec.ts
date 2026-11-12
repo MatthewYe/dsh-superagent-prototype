@@ -139,8 +139,8 @@ exit 0`)
   return { root, artifacts, state, dshHome, trace, ghTrace, marker, volume, existing, env }
 }
 
-function run(h: Harness, command: string, env: NodeJS.ProcessEnv = h.env) {
-  return spawnSync('bash', [SCRIPT, command], { encoding: 'utf8', env, timeout: 30_000 })
+function run(h: Harness, command: string, env: NodeJS.ProcessEnv = h.env, extra: string[] = []) {
+  return spawnSync('bash', [SCRIPT, command, ...extra], { encoding: 'utf8', env, timeout: 30_000 })
 }
 
 afterEach(() => {
@@ -317,5 +317,97 @@ describe('scripts/docker-instance', () => {
     const trace = readFileSync(h.trace, 'utf8')
     expect(trace).toContain('ps -a --filter label=com.docker.compose.project=dsh-unit')
     expect(trace.split('down --remove-orphans').length - 1).toBe(1)
+  }, 20_000)
+
+  it('prepares the livis instance against its own project, service and without the model key', () => {
+    const h = harness()
+    const env: Record<string, string | undefined> = {
+      ...h.env,
+      SUPERAGENT_INSTANCE: 'livis',
+      SUPERAGENT_PROJECT: 'dsh-livis',
+      SUPERAGENT_PUBLISH_PORT: '4083',
+      SUPERAGENT_STATE_DIR: h.state,
+    }
+    delete env.DEEPSEEK_API_KEY
+    // Point op at a missing binary: the livis path must not try to resolve a
+    // model key through 1Password at all.
+    env.SUPERAGENT_OP_BIN = join(h.root, 'missing-op')
+
+    const result = run(h, 'prepare', env)
+    expect(result.status, result.stderr).toBe(0)
+    const runtime = join(h.artifacts, 'instances', 'livis')
+    expect(existsSync(join(runtime, 'credentials.yaml'))).toBe(true)
+    const override = readFileSync(join(runtime, 'compose.runtime.yaml'), 'utf8')
+    expect(override).toContain('services:\n  livis:')
+    expect(override).not.toContain('superagent:')
+    expect(override).not.toContain('DEEPSEEK_API_KEY')
+    expect(override).toContain('target: /run/superagent/credentials.yaml')
+    expect(override).toContain('read_only: true')
+
+    const trace = readFileSync(h.trace, 'utf8')
+    expect(trace).toContain('volume create')
+    expect(trace).toContain('cp -a /import/.')
+  }, 20_000)
+
+  it('selects the livis instance from the command line without an exported instance variable', () => {
+    const h = harness()
+    const env = { ...h.env }
+    delete env.SUPERAGENT_INSTANCE
+    delete env.DEEPSEEK_API_KEY
+
+    const result = run(h, 'prepare', env, ['livis'])
+    expect(result.status, result.stderr).toBe(0)
+    const runtime = join(h.artifacts, 'instances', 'livis')
+    expect(readFileSync(join(runtime, 'compose.runtime.yaml'), 'utf8')).toContain('services:\n  livis:')
+    expect(readFileSync(h.trace, 'utf8')).toContain('volume create')
+  }, 20_000)
+
+  it('starts the livis instance through its own compose service and port', () => {
+    const h = harness()
+    const env: Record<string, string | undefined> = {
+      ...h.env,
+      SUPERAGENT_INSTANCE: 'livis',
+      SUPERAGENT_PROJECT: 'dsh-livis',
+      SUPERAGENT_PUBLISH_PORT: '4083',
+      SUPERAGENT_STATE_DIR: h.state,
+      SUPERAGENT_OP_BIN: join(h.root, 'missing-op'),
+    }
+    delete env.DEEPSEEK_API_KEY
+
+    const result = run(h, 'start', env)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('instance: livis')
+    expect(result.stdout).toContain('panel: http://127.0.0.1:4083/?token=unit-token')
+    const trace = readFileSync(h.trace, 'utf8')
+    expect(trace).toContain('up --detach livis')
+    expect(trace).toContain('logs --no-color --no-log-prefix livis')
+    expect(trace).toContain('ps --status running -q livis')
+    expect(trace).not.toContain('missing-op')
+
+    // stop is idempotent for the livis selector too.
+    const stopEnv = { ...env }
+    delete stopEnv.SUPERAGENT_IMAGE
+    const first = run(h, 'stop', stopEnv)
+    expect(first.status, first.stderr).toBe(0)
+    expect(first.stdout).toContain('livis-home')
+    const second = run(h, 'stop', stopEnv)
+    expect(second.status, second.stderr).toBe(0)
+    expect(second.stdout).toContain('already stopped')
+  }, 30_000)
+
+  it('refuses to prepare livis without the host DSH credential store', () => {
+    const h = harness()
+    rmSync(join(h.dshHome, '.credentials.yaml'))
+    const env: Record<string, string | undefined> = {
+      ...h.env,
+      SUPERAGENT_INSTANCE: 'livis',
+      SUPERAGENT_PROJECT: 'dsh-livis',
+      SUPERAGENT_PUBLISH_PORT: '4083',
+      SUPERAGENT_STATE_DIR: h.state,
+    }
+    const result = run(h, 'prepare', env)
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('livis instance needs the host DSH credential store')
+    expect(existsSync(join(h.artifacts, 'instances', 'livis', 'hosts.yml'))).toBe(false)
   }, 20_000)
 })
