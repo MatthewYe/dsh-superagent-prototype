@@ -58,6 +58,20 @@ RUN apt-get update \
 RUN useradd --uid 501 --gid 20 --home-dir /data/dsh --no-create-home --shell /bin/bash superagent \
     && mkdir -p /data/dsh /opt/superagent-template
 
+# The imported orchestrator state (worker-gitconfig and the GitHub Source's `cli`
+# setting) names the host's gh-agent shim by absolute path. Provide the same path
+# in the image, with the runtime hosts.yml mounted read-only over its config dir.
+RUN mkdir -p /Users/matthewye/.local/bin /Users/matthewye/.config/gh-agent \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        '# Container-side gh for the imported agent credential; hosts.yml is mounted read-only.' \
+        'GH_CONFIG_DIR="${GH_CONFIG_DIR:-/Users/matthewye/.config/gh-agent}"' \
+        'export GH_CONFIG_DIR' \
+        'exec gh "$@"' \
+        > /Users/matthewye/.local/bin/gh-agent \
+    && chmod 0755 /Users/matthewye/.local/bin/gh-agent \
+    && chown -R 501:20 /Users/matthewye
+
 ENV npm_config_manage_package_manager_versions=false
 RUN npm install --global "@deepseek-ai/dsh@${DSH_VERSION}" pnpm@11.7.0
 
@@ -93,8 +107,10 @@ RUN set -eux; \
 
 ENV DSH_HOME=/data/dsh \
     HOME=/data/dsh \
+    PATH=/Users/matthewye/.local/bin:$PATH \
     SUPERAGENT_STATE_DIR=${STATE_DIR} \
     SUPERAGENT_TEMPLATE=/opt/superagent-template \
+    SUPERAGENT_CREDENTIALS_SOURCE=/run/superagent/credentials.yaml \
     SUPERAGENT_RELAY_HOST=0.0.0.0 \
     SUPERAGENT_RELAY_PORT=13082 \
     SUPERAGENT_TARGET_HOST=127.0.0.1 \

@@ -19,20 +19,20 @@ The image currently carries only the `superagent` profile. The `livis` profile, 
 
 ### What exists today
 
-The Docker path at integration HEAD is the container skeleton merged from the deployment ticket. It is enough to build the image, run the `superagent` container and use the panel and management API. It is not enough for real work.
+The Docker path carries the container skeleton from the deployment ticket and the credential and state-import path from #3. It is enough to build the image, start a credentialled instance, import the host's state once and use the panel and management API.
 
 | Capability | Today | Follow-up |
 | --- | --- | --- |
 | Image, container, relay, healthcheck, panel | implemented and covered by the opt-in test | — |
-| Real agent GitHub credential | not implemented; no token in the image or Compose file | #3 |
-| Model key and DSH credential | not implemented; no model calls in the test | #3 |
-| One-time import of host state | not implemented; `superagent-state` starts empty | #3 |
+| Real agent GitHub credential | implemented by `scripts/docker-instance`: the token is resolved and validated, then materialised as a 0600 file, mounted read-only, removed by `stop` | — |
+| Model key and DSH credential | implemented by the start path: key from the environment or `op run`, DSH credential copied into the home volume | — |
+| One-time import of host state | implemented after a SQLite WAL checkpoint, with an idempotent marker and an unchanged host copy | — |
 | `livis` service and plugin | not implemented | #4 |
 | `scripts/dsh-superagent` driving Compose | not implemented; the script is still the host tmux path | #5 |
 | Hourly recovery of a Docker instance | not implemented; only the Compose restart policy | #5 |
 | Cutover runbook | not written | #7 |
 
-The opt-in test proves only the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, and teardown. It makes no model call and pushes nothing.
+The opt-in test proves the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, the shim and credential plumbing, one-time import with an unchanged host copy, and teardown. It makes a real model call and checks usage only when the model key resolves; otherwise that assertion is skipped and reported. The live GitHub check runs only after the start path has validated the token; if GitHub later rejects it, the test reports that and the shipped stand-in still proves the shim and the git credential path.
 
 ## Docker path
 
@@ -98,6 +98,31 @@ docker compose down
 
 The panel is published on `127.0.0.1` only. Do not add a `0.0.0.0` publish or a second port binding.
 
+### Credentialled start (ticket #3)
+
+Prefer `scripts/docker-instance` for a real instance. It wraps Compose and owns the per-instance credentials:
+
+```sh
+scripts/docker-instance start
+scripts/docker-instance status
+scripts/docker-instance stop
+```
+
+`start` resolves the agent's GitHub token with `GH_CONFIG_DIR=~/.config/gh-agent gh auth token` (gh reads the macOS Keychain through its own config) and falls back to the raw Keychain item (service `gh:github.com`, account `matthewye-agent`). The chosen token must pass `gh api user` in a temporary 0700 gh config directory before it is written, so a stale Keychain value fails the start with exit code 2 instead of being materialised. `start` also takes the DSH credential store from `~/.dsh/.credentials.yaml` and imports `~/.dsh/state/superagent` into the state volume once, after a SQLite `wal_checkpoint(TRUNCATE)`. It then runs Compose and stores the panel URL. `status` prints that URL and the container state. `stop` removes the container and the runtime credential files but keeps both volumes; the next `start` reuses the imported state because a marker in the volume skips the import. A second `stop` with no recorded image and no container for the project succeeds as an "already stopped" no-op, so it works without `SUPERAGENT_IMAGE` exported.
+
+The model key comes from `DEEPSEEK_API_KEY` or from the 1Password references in `~/.config/op/llm.env`. When the variable is absent, the wrapper re-executes itself under `op run --env-file`; a signed-out or locked 1Password fails the start. A missing or rejected GitHub token, missing model key or unavailable image is a configuration error with exit code 2. Runtime failures exit 1.
+
+Secrets live only in `.artifacts/instances/<instance>/` (mode 0700), never in this repository, [compose.yaml](../compose.yaml) or the image:
+
+| File | Mode | Purpose |
+| --- | --- | --- |
+| `hosts.yml` | 0600 | the validated token for `gh`, bind-mounted read-only at the container's `/Users/matthewye/.config/gh-agent/hosts.yml`; removed by `stop` |
+| `credentials.yaml` | 0600 | a copy of the host DSH credential store, bind-mounted read-only at `/run/superagent/credentials.yaml`; the entrypoint copies it into the home volume once |
+| `compose.runtime.yaml` | 0600 | the generated override with those mounts and the model-key environment |
+| `panel-url` | 0600 | the per-boot panel URL printed by `status` |
+
+Use the sanitised copy described under [Volumes and state](#volumes-and-state) for tests, so an imported instance cannot poll the real repository or create Tickets.
+
 ### What the container contains
 
 The image runs Debian bookworm slim with:
@@ -126,12 +151,12 @@ The Compose file defines two named volumes per instance:
 
 | Volume | Mounted at | Holds | Lost when |
 | --- | --- | --- | --- |
-| `superagent-home` | `/data/dsh` | profile, plugin link, DeepSeek Harness settings and, after follow-up #3, the DSH credential | `docker compose down --volumes` |
+| `superagent-home` | `/data/dsh` | profile, plugin link, DeepSeek Harness settings and the imported DSH credential | `docker compose down --volumes` |
 | `superagent-state` | `/Users/matthewye/.dsh/state/superagent` | orchestrator database, lock, command shims, git configuration, Tickets | `docker compose down --volumes` |
 
 Named volumes keep the host's state directories out of the container's write path. The host copies at `~/.dsh/state/superagent` and `~/.dsh/state/livis` stay as they are, so a rollback does not depend on the container.
 
-The state volume is empty on a fresh start. The one-time import of the host state after a SQLite WAL checkpoint is follow-up #3; until it lands, the container starts with no Tickets and no history. Do not copy the SQLite database into a running instance by hand: two writers would corrupt it.
+`scripts/docker-instance prepare` imports the host state into `superagent-state` once. It checkpoints the host SQLite WAL first, copies the directory into the volume, writes the `.imported` marker with the host hash, and verifies that the host copy did not change. Later starts keep the instance state and never import again. The host copy remains the rollback source. Do not copy the SQLite database into a running instance by hand: two writers would corrupt it, and the host copy would diverge from its hash.
 
 Back up a volume before an upgrade. The database inside is `<stateDir>/orchestrator.sqlite`; use your Docker volume backup procedure and test the restore before the rollback window closes.
 
@@ -170,21 +195,20 @@ The Compose file sets `restart: unless-stopped` for the container. There is no h
 
 The image and the Compose file contain no token. That is deliberate: image layers, build arguments and container metadata are not a secret store. Nothing in this chapter asks you to put a token in `compose.yaml`.
 
-At integration HEAD there is also no supported way to give the container a real agent credential or model key. In particular:
+`scripts/docker-instance` supplies credentials at start instead:
 
-- the agent GitHub token is not read from the macOS Keychain, materialised as a mode-0600 file, or removed on stop;
-- the model key is not injected at start and the DSH credential is not copied into the home volume;
-- missing credentials do not yet make the start fail with exit 2.
+- the GitHub token is resolved through `gh auth token` or the macOS Keychain, validated with `gh api user`, written as a 0600 `hosts.yml`, mounted read-only, and removed by `stop`;
+- the DSH credential store is copied into the private home volume on first start, not baked into the image;
+- the model key is passed only as the Compose process environment; it is never a file in the repository or image;
+- a missing or rejected GitHub token or model key stops the start with exit code 2 and an actionable message.
 
-Those belong to follow-up #3: the start will materialise the Keychain token as a container-only file, inject the model key through `op run`, copy the DSH credential into the private home, and remove the token file on stop. The wrapper that enforces the exit-2 failure is follow-up #5.
-
-Until then, the image's `gh` is unauthenticated, the baked profile has no model credential, and no DSH credential is copied in. The panel, management API and healthcheck work, but a Source cannot pass a real account check and a model reply cannot be produced. The opt-in test supplies a stand-in `gh` and asserts only the container contracts.
+The image provides the same `gh-agent` path the imported `worker-gitconfig` and GitHub Source `cli` setting use. The entrypoint points it at the mounted container `hosts.yml`; git credential helpers therefore work without rewriting the imported state. A direct `docker compose up` without the runtime override still boots, but `gh` is unauthenticated and no model credential is present: use the wrapper for real work.
 
 ## Configure an instance
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container it is a path inside the container, for example `/usr/bin/gh` from the image. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `/Users/matthewye/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -299,8 +323,9 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | Symptom | Cause and fix |
 | --- | --- |
 | `SUPERAGENT_IMAGE` is required | Build the image and export the printed tag, or set `SUPERAGENT_IMAGE` to an existing tag |
+| The start exits 2 saying the GitHub token did not pass `gh api user` | The Keychain item is stale or belongs to another account; re-authenticate with `GH_CONFIG_DIR=~/.config/gh-agent gh auth login`, then retry |
 | The container is healthy for a while, then `unhealthy` | The healthcheck calls the management API through the relay; check `docker compose logs superagent` for a stopped runtime or a failed part |
-| `docker compose ps` shows `unhealthy` and setup reports `repositoryUnset` | A fresh volume is unconfigured by design; configure the Source. Real credentials are follow-up #3 |
+| `docker compose ps` shows `unhealthy` and setup reports `repositoryUnset` | A fresh volume is unconfigured by design; configure the Source and start through `scripts/docker-instance`, which supplies the credentials. A direct `docker compose up` has none |
 | `Bind for 127.0.0.1:3082 failed: port is already allocated` | A host-profile instance or another container owns the port; stop it or set `SUPERAGENT_PUBLISH_PORT` |
 | The panel returns 401 | The token is per boot; re-read it from the container log after every restart |
 | The URL from the log does not open when `SUPERAGENT_PUBLISH_PORT` is set | The log names the container-internal `3082`; replace the port with the published one |

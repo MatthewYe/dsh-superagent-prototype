@@ -1,0 +1,422 @@
+#!/bin/bash
+# Start, stop, and inspect one Docker-backed dsh-superagent instance (ticket #3).
+#
+# The container image is stateless. This host-side wrapper materialises the
+# runtime credentials the container must not bake in:
+#
+#   * the agent's GitHub token, resolved through `gh auth token` (or the macOS
+#     Keychain as a fallback) and validated with `gh api user` before it is
+#     written as a hosts.yml that is mounted read-only and removed again on stop;
+#   * the host's DSH credential store, staged read-only for the entrypoint to
+#     copy into the private DSH home on first start;
+#   * the model key, resolved from the host environment or 1Password and passed
+#     only as the compose process environment.
+#
+# It also imports the host state directory once, after a SQLite WAL checkpoint,
+# and writes the per-boot panel URL under .artifacts/.
+#
+# Exit codes: 0 normal, 1 runtime failure, 2 configuration error (missing or
+# unvalidated GitHub token, missing model key, missing image).
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+script=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+
+command=${1:-}
+if [ "$#" -gt 0 ]; then shift; fi
+
+instance=${SUPERAGENT_INSTANCE:-superagent}
+project=${SUPERAGENT_PROJECT:-dsh-superagent-$instance}
+image=${SUPERAGENT_IMAGE:-}
+publish=${SUPERAGENT_PUBLISH_PORT:-3082}
+state_dir=${SUPERAGENT_STATE_DIR:-$HOME/.dsh/state/superagent}
+dsh_home=${SUPERAGENT_DSH_HOME:-$HOME/.dsh}
+gh_service=${SUPERAGENT_GH_KEYCHAIN_SERVICE:-gh:github.com}
+gh_account=${SUPERAGENT_GH_KEYCHAIN_ACCOUNT:-matthewye-agent}
+gh_bin=${SUPERAGENT_GH_BIN:-gh}
+gh_config_dir=${SUPERAGENT_GH_CONFIG_DIR:-$HOME/.config/gh-agent}
+op_env=${SUPERAGENT_OP_ENV_FILE:-$HOME/.config/op/llm.env}
+artifacts=${SUPERAGENT_ARTIFACTS_DIR:-$root/.artifacts}
+runtime=$artifacts/instances/$instance
+volume=${project}_superagent-state
+security_bin=${SUPERAGENT_SECURITY_BIN:-security}
+docker_bin=${SUPERAGENT_DOCKER_BIN:-docker}
+op_bin=${SUPERAGENT_OP_BIN:-op}
+validated_login=''
+
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/docker-instance <command>
+
+  start     resolve credentials, import state once, start the container, print the panel URL
+  prepare   materialise credentials and import state without starting (used by tests)
+  stop      remove the container and runtime credentials; keep the instance volumes
+  status    print the container state and the last panel URL
+EOF
+}
+
+config_error() {
+  printf 'docker-instance: %s\n' "$*" >&2
+  printf 'docker-instance: see docs/006-deployment.md (Docker deployment) for the required host setup.\n' >&2
+  exit 2
+}
+
+runtime_error() {
+  printf 'docker-instance: %s\n' "$*" >&2
+  exit 1
+}
+
+require_image() {
+  [ -n "$image" ] \
+    || config_error "SUPERAGENT_IMAGE is not set. Build the image with scripts/docker-build and export the tag it prints."
+  "$docker_bin" image inspect "$image" >/dev/null 2>&1 \
+    || config_error "image $image is not available locally. Build it with scripts/docker-build first."
+}
+
+compose() {
+  local files=(-f "$root/compose.yaml")
+  if [ -f "$runtime/compose.runtime.yaml" ]; then
+    files+=(-f "$runtime/compose.runtime.yaml")
+  fi
+  SUPERAGENT_IMAGE="$image" SUPERAGENT_PUBLISH_PORT="$publish" DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
+    "$docker_bin" compose "${files[@]}" --project-directory "$root" -p "$project" "$@"
+}
+
+write_hosts_yml() {
+  local path=$1 token=$2
+  {
+    printf 'github.com:\n'
+    printf '    git_protocol: https\n'
+    printf '    users:\n'
+    printf '        %s:\n' "$gh_account"
+    printf '    user: %s\n' "$gh_account"
+    printf '    oauth_token: %s\n' "$token"
+  } > "$path"
+  chmod 0600 "$path"
+}
+
+# Prove a candidate token against GitHub before it reaches the runtime file:
+# write it to a throwaway 0700 gh config and ask gh who it is. GH_TOKEN and
+# GITHUB_TOKEN are cleared so the candidate itself must answer. The token is
+# never printed; only the resulting login is reported.
+validate_github_token() {
+  local token=$1 dir login status
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/docker-instance-gh.XXXXXX") \
+    || config_error "could not create a temporary config directory to validate the GitHub token."
+  chmod 0700 "$dir"
+  write_hosts_yml "$dir/hosts.yml" "$token"
+
+  set +e
+  login=$(env -u GH_TOKEN -u GITHUB_TOKEN "GH_CONFIG_DIR=$dir" "$gh_bin" api user --jq .login 2>/dev/null)
+  status=$?
+  set -e
+  rm -rf -- "$dir"
+
+  [ "$status" -eq 0 ] || return 1
+  login=$(printf '%s' "$login" | tr -d '\r\n')
+  [ -n "$login" ] || return 1
+  validated_login=$login
+  return 0
+}
+
+# The Keychain item can be stale while gh has a working token of its own (gh
+# reads the Keychain through its own config), so try gh first, then the raw
+# Keychain value, and accept only a candidate GitHub accepts.
+read_github_token() {
+  local gh_available=0 gh_token='' keychain_token=''
+  validated_login=''
+
+  if command -v "$gh_bin" >/dev/null 2>&1; then
+    gh_available=1
+    gh_token=$(env -u GH_TOKEN -u GITHUB_TOKEN "GH_CONFIG_DIR=$gh_config_dir" "$gh_bin" auth token 2>/dev/null || true)
+  fi
+  keychain_token=$("$security_bin" find-generic-password -s "$gh_service" -a "$gh_account" -w 2>/dev/null || true)
+
+  if [ "$gh_available" -eq 1 ] && [ -n "$gh_token" ]; then
+    if validate_github_token "$gh_token"; then
+      printf 'docker-instance: validated the agent GitHub token for account %s from %s.\n' "$validated_login" "$gh_config_dir" >&2
+      printf '%s' "$gh_token"
+      return 0
+    fi
+    printf 'docker-instance: the gh auth token under %s did not pass gh api user; trying the macOS Keychain value.\n' "$gh_config_dir" >&2
+  fi
+
+  if [ "$gh_available" -eq 1 ] && [ -n "$keychain_token" ]; then
+    if validate_github_token "$keychain_token"; then
+      printf 'docker-instance: validated the agent GitHub token for account %s from the macOS Keychain.\n' "$validated_login" >&2
+      printf '%s' "$keychain_token"
+      return 0
+    fi
+    printf 'docker-instance: the macOS Keychain value for service %s did not pass gh api user.\n' "$gh_service" >&2
+  fi
+
+  [ "$gh_available" -eq 1 ] \
+    || config_error "gh is not installed, so the agent's GitHub token cannot be validated. Install gh, then run 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (or export SUPERAGENT_GH_BIN to the gh binary)."
+
+  if [ -z "$gh_token" ] && [ -z "$keychain_token" ]; then
+    config_error "no GitHub token for the agent in $gh_config_dir or the macOS Keychain (service '$gh_service', account '$gh_account'). Sign in with 'GH_CONFIG_DIR=$gh_config_dir gh auth login', or check the Keychain item with: security find-generic-password -s '$gh_service' -a '$gh_account' -w. The token is validated with 'gh api user' before it is used."
+  fi
+
+  config_error "no usable GitHub token for the agent: neither 'gh auth token' under $gh_config_dir nor the macOS Keychain value for service '$gh_service' passed 'gh api user'. Re-authenticate with 'GH_CONFIG_DIR=$gh_config_dir gh auth login' (the Keychain item may be stale), then retry."
+}
+
+write_runtime_credentials() {
+  local token=$1
+  umask 077
+  mkdir -p "$artifacts/instances" "$runtime"
+  chmod 0700 "$artifacts" "$artifacts/instances" "$runtime"
+
+  write_hosts_yml "$runtime/hosts.yml" "$token"
+
+  if [ -f "$dsh_home/.credentials.yaml" ]; then
+    install -m 0600 "$dsh_home/.credentials.yaml" "$runtime/credentials.yaml"
+  else
+    printf 'docker-instance: %s not found; starting without the host DSH credential store.\n' \
+      "$dsh_home/.credentials.yaml" >&2
+  fi
+
+  write_override
+  printf '%s\n' "$image" > "$runtime/image"
+  printf '%s\n' "$publish" > "$runtime/port"
+  chmod 0600 "$runtime/image" "$runtime/port"
+}
+
+write_override() {
+  {
+    printf 'services:\n'
+    printf '  superagent:\n'
+    printf '    environment:\n'
+    printf '      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"\n'
+    printf '    volumes:\n'
+    printf '      - type: bind\n'
+    printf '        source: "%s"\n' "$runtime/hosts.yml"
+    printf '        target: /Users/matthewye/.config/gh-agent/hosts.yml\n'
+    printf '        read_only: true\n'
+    if [ -f "$runtime/credentials.yaml" ]; then
+      printf '      - type: bind\n'
+      printf '        source: "%s"\n' "$runtime/credentials.yaml"
+      printf '        target: /run/superagent/credentials.yaml\n'
+      printf '        read_only: true\n'
+    fi
+  } > "$runtime/compose.runtime.yaml"
+  chmod 0600 "$runtime/compose.runtime.yaml"
+}
+
+checkpoint_state() {
+  local db=$state_dir/orchestrator.sqlite
+  [ -d "$state_dir" ] || return 0
+  [ -f "$db" ] || return 0
+  python3 - "$db" <<'PY'
+import sqlite3
+import sys
+
+path = sys.argv[1]
+connection = sqlite3.connect(path, timeout=30)
+try:
+    busy, _log, _checkpointed = connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+finally:
+    connection.close()
+if busy:
+    raise SystemExit(f'orchestrator.sqlite is busy; stop the host superagent instance before importing it')
+PY
+}
+
+state_hash() {
+  [ -d "$state_dir" ] || { printf 'absent\n'; return 0; }
+  (
+    cd "$state_dir"
+    find . -type f ! -name '*.sqlite-shm' -print | LC_ALL=C sort | while IFS= read -r file; do
+      shasum -a 256 "$file"
+    done | shasum -a 256 | awk '{print $1}'
+  )
+}
+
+ensure_volume() {
+  if ! "$docker_bin" volume inspect "$volume" >/dev/null 2>&1; then
+    "$docker_bin" volume create \
+      --label "com.docker.compose.project=$project" \
+      --label "com.docker.compose.volume=superagent-state" \
+      "$volume" >/dev/null
+  fi
+}
+
+import_state() {
+  [ -d "$state_dir" ] || {
+    printf 'docker-instance: no host state at %s; nothing to import.\n' "$state_dir" >&2
+    return 0
+  }
+  require_image
+  ensure_volume
+
+  if "$docker_bin" run --rm --entrypoint sh \
+      -v "$state_dir:/import:ro" -v "$volume:/state" "$image" \
+      -c 'test -f /state/.imported' >/dev/null 2>&1; then
+    printf 'docker-instance: state was already imported into volume %s; keeping it.\n' "$volume" >&2
+    return 0
+  fi
+
+  if "$docker_bin" run --rm --entrypoint sh \
+      -v "$volume:/state" "$image" \
+      -c 'test -e /state/orchestrator.sqlite' >/dev/null 2>&1; then
+    runtime_error "volume $volume already contains orchestrator state but no import marker; refusing to overwrite it. Remove the volume only if that state is disposable."
+  fi
+
+  local before after marker
+  before=$(state_hash)
+  marker="imported=$(date -u +%Y-%m-%dT%H:%M:%SZ) hash=$before source=$state_dir"
+  if ! "$docker_bin" run --rm --entrypoint sh \
+      -e SUPERAGENT_IMPORT_MARKER="$marker" \
+      -v "$state_dir:/import:ro" -v "$volume:/state" "$image" \
+      -c 'set -e; cp -a /import/. /state/; rm -f /state/orchestrator.sqlite-shm; printf "%s\n" "$SUPERAGENT_IMPORT_MARKER" > /state/.imported; chmod 0600 /state/.imported'; then
+    runtime_error "could not copy $state_dir into volume $volume."
+  fi
+  after=$(state_hash)
+  if [ "$before" != "$after" ]; then
+    runtime_error "the host state at $state_dir changed while it was being imported; stop the host superagent instance and try again."
+  fi
+  printf 'docker-instance: imported %s into volume %s once (sha256 %s).\n' "$state_dir" "$volume" "$before" >&2
+}
+
+require_model_key() {
+  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    return 0
+  fi
+  if [ "${SUPERAGENT_MODEL_RESOLVED:-0}" = "1" ]; then
+    config_error "DEEPSEEK_API_KEY is still empty after op run. Point DEEPSEEK_API_KEY in $op_env at the DeepSeek key, or export DEEPSEEK_API_KEY."
+  fi
+
+  local op
+  op=$(command -v "$op_bin" 2>/dev/null || true)
+  [ -n "$op" ] \
+    || config_error "DEEPSEEK_API_KEY is not set and the 1Password CLI (op) is not installed. Export DEEPSEEK_API_KEY or install op and create $op_env."
+  "$op" whoami >/dev/null 2>&1 \
+    || config_error "DEEPSEEK_API_KEY is not set and 1Password is not signed in. Run 'op signin', or export DEEPSEEK_API_KEY, then retry."
+  [ -f "$op_env" ] \
+    || config_error "DEEPSEEK_API_KEY is not set and $op_env does not exist. Create it with DEEPSEEK_API_KEY=op://... (see docs/006-deployment.md)."
+
+  printf 'docker-instance: DEEPSEEK_API_KEY is not set; resolving it through op run --env-file=%s\n' "$op_env" >&2
+  set +e
+  "$op" run --env-file="$op_env" -- env SUPERAGENT_MODEL_RESOLVED=1 "$script" "$command" "$@"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    config_error "1Password could not resolve the model key from $op_env (op run exited $status). Unlock 1Password or export DEEPSEEK_API_KEY, then retry."
+  fi
+  exit 0
+}
+
+prepare() {
+  require_image
+  local token
+  token=$(read_github_token)
+  write_runtime_credentials "$token"
+  checkpoint_state
+  import_state
+}
+
+wait_for_panel_url() {
+  local token line deadline=$((SECONDS + 180))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    token=$(compose logs --no-color --no-log-prefix superagent 2>/dev/null \
+      | grep -o 'token=[A-Za-z0-9_-]*' | tail -n 1 || true)
+    if [ -n "$token" ]; then
+      printf 'http://127.0.0.1:%s/?%s\n' "$publish" "$token"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+start() {
+  require_model_key
+  prepare
+  compose up --detach
+  local url
+  if ! url=$(wait_for_panel_url); then
+    runtime_error "the container started but no 'dsh web: ...?token=' log line appeared within 180s. Inspect it with: docker compose -p $project logs superagent"
+  fi
+  umask 077
+  printf '%s\n' "$url" > "$runtime/panel-url"
+  chmod 0600 "$runtime/panel-url"
+  status
+}
+
+remove_runtime_dir() {
+  case "$runtime" in
+    "$artifacts"/instances/*) rm -rf -- "$runtime" ;;
+    *) runtime_error "refusing to remove unexpected runtime path $runtime" ;;
+  esac
+}
+
+stop() {
+  if [ -f "$runtime/image" ]; then
+    [ -n "$image" ] || image=$(cat "$runtime/image")
+    if [ -z "${SUPERAGENT_PUBLISH_PORT:-}" ] && [ -f "$runtime/port" ]; then
+      publish=$(cat "$runtime/port")
+    fi
+  fi
+
+  local containers
+  containers=$("$docker_bin" ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}' 2>/dev/null) \
+    || runtime_error "could not list the containers of project $project; is the Docker daemon running?"
+
+  # Nothing recorded and nothing running: stop is a successful no-op. Without
+  # this, compose would interpolate an empty SUPERAGENT_IMAGE and exit 1.
+  if [ -z "$image" ] && [ -z "$containers" ]; then
+    remove_runtime_dir
+    printf 'docker-instance: %s is already stopped; no runtime image and no container for project %s.\n' \
+      "$instance" "$project"
+    return 0
+  fi
+
+  # A container can outlive the runtime directory (for example when it was
+  # removed by hand); recover its image tag so compose can still resolve.
+  if [ -z "$image" ]; then
+    local container
+    container=$(printf '%s\n' "$containers" | head -n 1)
+    image=$("$docker_bin" inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)
+    [ -n "$image" ] \
+      || runtime_error "container $container is left for project $project but its image tag could not be recovered; remove it with: docker compose -p $project down"
+  fi
+
+  if ! compose down --remove-orphans; then
+    runtime_error "could not stop the project $project with docker compose."
+  fi
+  remove_runtime_dir
+  printf 'docker-instance: stopped %s. Volumes %s_superagent-home and %s were kept.\n' \
+    "$instance" "$project" "$volume"
+}
+
+status() {
+  local running='' url=''
+  if [ -z "$image" ] && [ -f "$runtime/image" ]; then
+    image=$(cat "$runtime/image")
+  fi
+  if [ -n "$image" ]; then
+    running=$(compose ps --status running -q superagent 2>/dev/null | head -n 1 || true)
+  fi
+  if [ -f "$runtime/panel-url" ]; then
+    url=$(cat "$runtime/panel-url")
+  fi
+  if [ -n "$running" ]; then
+    printf 'instance: %s\ncontainer: running\n' "$instance"
+  else
+    printf 'instance: %s\ncontainer: stopped\n' "$instance"
+  fi
+  if [ -n "$url" ]; then
+    printf 'panel: %s\n' "$url"
+  else
+    printf 'panel: unavailable (run scripts/docker-instance start)\n'
+  fi
+  [ -n "$running" ]
+}
+
+case "$command" in
+  start) start ;;
+  prepare) prepare ;;
+  stop) stop ;;
+  status) status ;;
+  ''|-h|--help|help) usage; [ -z "$command" ] && exit 2 || exit 0 ;;
+  *) usage; exit 2 ;;
+esac
