@@ -250,12 +250,14 @@ export async function startRuntime(seed?: (store: Store) => void) {
   seed?.(seeded)
   seeded.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
-  await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  await runtime.ready
   const settings = runtime.store.settings()
   runtime.store.saveSettings({ ...settings, eval: { ...settings.eval, mode: 'auto' },
     policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
     sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  // The kinds register before `ready` so setup probes them, which runs the registry's post-startup sync before this fixture's Policy exists.
+  void runtime.settings.sync('feishu').catch(() => { /* sync() records its failure in health. */ })
   deliveries.mockClear()
 
   /** Parsed JSON payloads delivered to `sessionId`. */

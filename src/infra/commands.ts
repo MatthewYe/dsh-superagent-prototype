@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
+import type { FeishuBot } from '../sources/feishu-setup.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -101,7 +102,7 @@ export class Commands {
    * @throws CliError with Feishu's error code on failure (rewriting 232011 when the bot is not in the chat).
    */
   async lark<T>(args: string[], cwd?: string): Promise<T> {
-    const bot = this.deployment.feishu
+    const bot = this.deployment.sources.feishu as FeishuBot | undefined
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
     const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)
       .catch((error: unknown) => { throw membership(error) })

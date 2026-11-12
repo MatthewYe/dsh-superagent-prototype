@@ -16,7 +16,7 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   expect(text()).toContain(zh['sourceState.error'])
   expect(text()).toContain('socket closed')
   expect(all('.dt-card')).toHaveLength(0)
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
+  server.setup = { ...server.setup, problems: { github: problemOf('agentCliUnset') } }
   await remount()
   await click(zh['tab.source'])
   await click(zh.sourceOpenSettings)
@@ -121,7 +121,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
 })
 
 it('points a setup problem at the settings that fix it', async () => {
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: { github: problemOf('agentCliUnset') }, accounts: null }
   // jsdom has no scrolling; mock scrollIntoView to record which card the link brings into view.
   const scroll = vi.fn()
   Element.prototype.scrollIntoView = scroll
@@ -144,7 +144,7 @@ it('points a setup problem at the settings that fix it', async () => {
   await click(zh.setupCheck)
   expect(server.requests.filter(request => request.path === 'setup/check')).toEqual([{ path: 'setup/check', method: 'POST' }])
   expect(text()).toContain(zh.setupChecking)
-  server.setup = { ...server.setup, problem: problemOf('gitTooOld') }
+  server.setup = { ...server.setup, problems: { deployment: problemOf('gitTooOld') } }
   await remount()
   await click(zh['tab.overview'])
   await click(find(zh.problemSetup, 'button, a, [role="button"]'))
@@ -153,12 +153,12 @@ it('points a setup problem at the settings that fix it', async () => {
 })
 
 it('shows a failed Feishu bot check as a problem of the Feishu Source only, with a check after a fix outside dsh-superagent', async () => {
-  server.setup = { ...server.setup, feishuProblem: problemOf('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }),
-    accounts: { ...server.setup.accounts!, feishu: null } }
+  server.setup = { ...server.setup, problems: { feishu: problemOf('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }) },
+    accounts: { ...server.setup.accounts!, sources: {} } }
   await mount()
-  expect(text()).toContain(zh.problemSetupFeishu)
+  expect(text()).toContain(zh['problemSetup.feishu'])
   expect(text()).not.toContain('飞书 来源异常')
-  await click(find(zh.problemSetupFeishu, 'button, a, [role="button"]'))
+  await click(find(zh['problemSetup.feishu'], 'button, a, [role="button"]'))
   const feishu = all('.dt-card')[0]!
   expect(feishu.textContent).toContain('部署检查未通过：应用 cli_bot 的机器人身份状态是 missing；用 lark-cli 配置应用密钥。')
   // dsh-superagent runs meanwhile, so checking again asks first: the restart interrupts running Executor Sessions.
@@ -173,7 +173,7 @@ it('shows a failed Feishu bot check as a problem of the Feishu Source only, with
 })
 
 it('leaves Feishu out of a GitHub-only deployment', async () => {
-  server.setup = { ...server.setup, accounts: { ...server.setup.accounts!, feishu: null } }
+  server.setup = { ...server.setup, accounts: { ...server.setup.accounts!, sources: {} } }
   server.settings = { ...server.settings, sources: { ...server.settings.sources, feishu: { enabled: false, config: {} } } }
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
@@ -183,7 +183,7 @@ it('leaves Feishu out of a GitHub-only deployment', async () => {
 })
 
 it('shows the Sources waiting for the deployment check, and the problem on the Source that fixes it, with its link', async () => {
-  server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: { github: problemOf('repositoryUnset') }, accounts: null }
   await mount()
   await click(zh['tab.source'])
   const rows = all('.dt-form > .dt-list > .dt-row')
@@ -224,7 +224,7 @@ it('shows a setup problem on its Source card within one read of the settings, wh
   await mount()
   const card = () => document.getElementById('dt-source-github')!
   expect(card().textContent).not.toContain(zh['setup.agentCliUnset'])
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
+  server.setup = { ...server.setup, problems: { github: problemOf('agentCliUnset') } }
   // The settings are read every five seconds, as the state is; the Source settings do not read the Source status.
   await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
   expect(server.requests.filter(request => request.path === 'settings')).toHaveLength(2)

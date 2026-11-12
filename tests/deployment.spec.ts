@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDeployment, type Machine, type Probe } from '../src/deployment.ts'
+import { resolveFeishuBot } from '../src/sources/feishu-setup.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
