@@ -38,9 +38,10 @@ export const slackKind: SourceKind<SlackConfig> = {
   facts: (deployment): Record<string, Localized | string> => {
     const profile = slackProfile(deployment)
     const name = profile?.name || profile?.botId
-    return profile ? { bot: { zh: `当前机器人 ${name}`, en: `Current bot ${name}` } } : {}
+    return profile ? { bot: { zh: `已连接到 ${profile.team}，机器人 @${name}`, en: `Connected to ${profile.team} as @${name}` } } : {}
   },
   fields: [
+    { key: 'bot', type: 'fact', label: { zh: 'Slack 连接', en: 'Slack connection' } },
     { key: 'cli', type: 'text', label: { zh: 'slack-bridge 路径', en: 'slack-bridge path' },
       hint: { zh: '命令名或绝对路径。保存时用 --version 检查桥，再用 bot token 读取工作区和机器人，然后重启 dsh-superagent。', en: 'A command name or absolute path. Saving checks the bridge with --version, reads the workspace and bot with the bot token, then restarts dsh-superagent.' } },
     { key: 'chats', type: 'rows', label: { zh: '接收的会话', en: 'Conversations' },

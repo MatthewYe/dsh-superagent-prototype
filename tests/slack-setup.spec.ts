@@ -92,11 +92,12 @@ it('reports a token Slack rejects with Slack\'s error', async () => {
 
 it('declares the settings fields, setup field, health rows and resolved bot fact', () => {
   expect(slackKind.setup?.fields).toEqual(['cli'])
-  expect(slackKind.fields.map(field => field.key)).toEqual(['cli', 'chats', 'otherChats', 'directMessages', 'readPageSize', 'backfillDays'])
+  expect(slackKind.fields.map(field => field.key)).toEqual(['bot', 'cli', 'chats', 'otherChats', 'directMessages', 'readPageSize', 'backfillDays'])
+  expect(slackKind.fields[0]).toMatchObject({ type: 'fact' })
   expect(slackKind.health).toEqual(['slack', 'history:slack'])
   const deployment = testDeployment({ sources: { slack: { cli: '/opt/bin/slack-bridge', teamId: 'T01234567', team: 'Acme',
     botId: 'B01234567', userId: 'U01234567', name: 'superagent', url: 'https://acme.slack.com/' } } })
-  expect(slackKind.facts?.(deployment)).toEqual({ bot: { zh: '当前机器人 superagent', en: 'Current bot superagent' } })
+  expect(slackKind.facts?.(deployment)).toEqual({ bot: { zh: '已连接到 Acme，机器人 @superagent', en: 'Connected to Acme as @superagent' } })
 })
 
 it('stores the Slack and Feishu profiles in their own deployment slots', async () => {
