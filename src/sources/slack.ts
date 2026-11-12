@@ -1,12 +1,16 @@
 /** Slack source kind definition and Cordis plugin entry. */
 import { z } from 'zod'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Deployment } from '../deployment.ts'
-import { resolveSlackProfile, slackProfile } from './slack-setup.ts'
+import type { SetupProblem } from '../setup.ts'
+import { health, sourceContext, type Health, type SourceContext } from './host.ts'
+import { resolveSlackProfile, slackProfile, type SlackProfile } from './slack-setup.ts'
 import type { Localized, SourceKind } from './kind.ts'
+import type { SourceRegistry } from './registry.ts'
 
 export const ConversationSchema = z.object({
-  conversationId: z.string().regex(/^[CG][A-Z0-9]{5,}$/),
-  name: z.string().trim().max(60).optional(),
+  conversationId: z.string().regex(/^[CG][A-Z0-9]{5,}$/, 'A Slack conversation ID starts with C or G followed by at least five uppercase letters or digits'),
+  name: z.string().max(60).optional(),
   listen: z.enum(['mentions', 'all']),
 }).strict()
 export type Conversation = z.infer<typeof ConversationSchema>
@@ -53,5 +57,47 @@ export const slackKind: SourceKind<SlackConfig> = {
   health: ['slack', 'history:slack'],
 }
 
+/**
+ * The Slack health rows before the socket and backfill loops exist: a disabled Source, a missing bridge or a failed
+ * profile check pauses both, a resolved profile connects `slack` and leaves `history:slack` waiting for its first pass.
+ */
+export function slackHealth(config: SlackConfig | undefined, profile: SlackProfile | undefined,
+  problem?: SetupProblem): { slack: Health; history: Health } {
+  if (!config) return { slack: health('paused', 'sourceOff'), history: health('paused', 'sourceOff') }
+  if (!config.cli) return { slack: health('paused', 'slackBridgeUnset'), history: health('paused', 'slackBridgeUnset') }
+  if (!profile) return { slack: problem ? { state: 'paused', detail: problem.detail } : health('paused', 'setupPending'),
+    history: health('paused', 'setupPending') }
+  return { slack: health('ready', 'slackConnected', { team: profile.team, bot: profile.name || profile.botId }),
+    history: health('starting', 'slackFirstPass') }
+}
+
 /** The Slack profile resolved into the deployment's per-source slots, if the Slack probe succeeded. */
 export { slackProfile, type SlackProfile } from './slack-setup.ts'
+
+/** Returns the Slack Source's settings, falling back to schema defaults while the Slack plugin is disabled. */
+export const slackSettings = (sources: SourceRegistry): SlackConfig =>
+  sources.instance<SlackConfig>('slack')?.config ?? SlackConfigSchema.parse({})
+
+/**
+ * Report the Source's setup health until a later ticket starts its socket and backfill. The plugin effect keeps this
+ * promise pending on the abort signal, so stopping the Source disposes nothing and restarting re-runs the check.
+ */
+export async function runSlack(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+  await ctx.ready
+  if (signal.aborted) return
+  const rows = slackHealth(ctx.config<SlackConfig>('slack'), slackProfile(ctx.deployment), ctx.problem)
+  ctx.report('slack', rows.slack)
+  ctx.report('history:slack', rows.history)
+  await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+}
+
+export const name = 'dsh-superagent-slack'
+export const inject = ['orchestrator']
+export function apply(ctx: Context): void {
+  ctx.effect(() => ctx.orchestrator.sources.register(slackKind), 'slack: source kind')
+  ctx.effect(() => {
+    const controller = new AbortController()
+    const running = runSlack(sourceContext(ctx.orchestrator, slackKind), controller.signal)
+    return async () => { controller.abort(); await running }
+  })
+}
