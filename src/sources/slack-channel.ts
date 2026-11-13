@@ -29,12 +29,17 @@ export const slackGone = (error: string | undefined): boolean => !!error && GONE
 
 /**
  * Posts one reply with `chat.postMessage`, always in the thread of the request: `thread_ts` when the request was in a
- * thread, otherwise the message's own `ts`. No `client_msg_id`, blocks, or `chat.update`.
+ * thread, otherwise the message's own `ts`. In a channel or group the copy is also broadcast into the conversation
+ * with `reply_broadcast: true`, like ticking "Also send to #channel"; a DM omits it because there is no channel to
+ * broadcast to. No `client_msg_id`, blocks, or `chat.update`.
  */
 export async function sendSlack(host: ChannelSendHost, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const { conversation, ts, thread_ts } = message.channel.address
   if (!conversation || !ts) throw new Error('Missing Slack reply target')
-  const body = { channel: conversation, text: message.text, thread_ts: thread_ts ?? ts }
+  /** DM channel ids start with `D`; channels and private groups start with `C` or `G`. */
+  const body = conversation.startsWith('D')
+    ? { channel: conversation, text: message.text, thread_ts: thread_ts ?? ts }
+    : { channel: conversation, text: message.text, thread_ts: thread_ts ?? ts, reply_broadcast: true }
   const output = await host.commands.slack(['api', 'chat.postMessage', JSON.stringify(body)])
   let answer: z.infer<typeof AnswerSchema>
   try { answer = AnswerSchema.parse(JSON.parse(output)) }

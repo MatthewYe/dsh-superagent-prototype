@@ -26,15 +26,23 @@ describe('sendSlack', () => {
     await expect(sendSlack(h, message())).resolves.toBe('sent')
     const args = slack.mock.calls[0]![0]
     expect(args.slice(0, 2)).toEqual(['api', 'chat.postMessage'])
-    expect(JSON.parse(args[2]!)).toEqual({ channel: 'C0123ABCD', text: 'Fixed it.', thread_ts: '1712345000.000100' })
+    expect(JSON.parse(args[2]!)).toEqual({
+      channel: 'C0123ABCD', text: 'Fixed it.', thread_ts: '1712345000.000100', reply_broadcast: true })
     expect(args[2]).not.toContain('client_msg_id')
     expect(args[2]).not.toContain('blocks')
   })
 
-  it('threads a top-level message under its own ts', async () => {
+  it('threads a DM top-level message under its own ts, without broadcasting', async () => {
     const { slack, host: h } = host({ ok: true })
     await sendSlack(h, message({ channel: { source: 'slack', thread: 'slack:D0123ABCD', address: { conversation: 'D0123ABCD', ts: '1712345678.000100' } } }))
-    expect(JSON.parse(slack.mock.calls[0]![0][2]!)).toMatchObject({ channel: 'D0123ABCD', thread_ts: '1712345678.000100' })
+    expect(JSON.parse(slack.mock.calls[0]![0][2]!)).toEqual({ channel: 'D0123ABCD', text: 'Fixed it.', thread_ts: '1712345678.000100' })
+  })
+
+  it('broadcasts a top-level channel message from its own thread into the channel', async () => {
+    const { slack, host: h } = host({ ok: true })
+    await sendSlack(h, message({ channel: { source: 'slack', thread: 'slack:C0123ABCD', address: { conversation: 'C0123ABCD', ts: '1712345678.000100' } } }))
+    expect(JSON.parse(slack.mock.calls[0]![0][2]!)).toEqual({
+      channel: 'C0123ABCD', text: 'Fixed it.', thread_ts: '1712345678.000100', reply_broadcast: true })
   })
 
   it('reports a permanently unreachable Channel as gone', async () => {

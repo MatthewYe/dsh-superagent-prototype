@@ -454,19 +454,22 @@ Slack identities are never mapped to Feishu or GitHub identities. The roster wri
 
 ### 10.1 Shape
 
-A reply is `chat.postMessage` with three fields:
+A reply is `chat.postMessage` with four fields, except for a DM, which omits `reply_broadcast`:
 
 ```ts
 {
   channel: address.conversation,
   text: message.text,
   thread_ts: address.thread_ts ?? address.ts,
+  reply_broadcast: true,
 }
 ```
 
+Slack DM channel ids start with `D`; channels and private groups start with `C` or `G`.
+
 No `client_msg_id` is sent: Slack requires a UUID there, while the receipt id is a 32-hex SHA-256 slice, and Slack documents no deduplication. Delivery stays at-least-once (section 10.4).
 
-Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. This is the rule that makes a DM behave like Feishu: each DM message starts its own Thread and the answer is posted under that message (section 16 of the ratified decisions). A top-level channel message starts a Thread the same way, so answers never sprawl into the channel.
+Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. In a channel the copy is also broadcast into the channel (`reply_broadcast: true`), the equivalent of ticking "Also send to #channel" in the Slack client, so a mention's answer is visible in the channel as well as in its thread. A DM omits `reply_broadcast`, because Slack has no channel to broadcast to; each DM message keeps its own Thread and the answer is posted under that message (section 16 of the ratified decisions), so DM answers stay thread-only.
 
 There is no Block Kit, no `blocks`, no `markdown_text`, no `chat.update`, and no streaming API in v1. The agent's text is sent as `text` in mrkdwn. Mentioning people is not part of the reply contract; if an agent writes `@someone`, Slack renders the plain text and does not notify them, because a real notification needs `<@U…>` syntax.
 
