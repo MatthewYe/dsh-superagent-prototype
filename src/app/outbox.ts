@@ -9,7 +9,7 @@ import type { Store } from './store.ts'
 export interface OutboxHost {
   readonly store: Pick<Store, 'atomic' | 'receipts'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
-  readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
+  readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send' | 'words'>
   readonly commands: Commands
   paused(): boolean
 }
@@ -17,7 +17,7 @@ export interface OutboxHost {
 /**
  * Persists outbound channel messages as receipts and delivers them sequentially through `Effects` and `SourceRegistry`.
  * Implements the core `Outbox` port for `Engine` and source contexts, ensuring per-conversation ordering for each ticket until an earlier message fails repeatedly.
- * Messages wait while processing is paused or their source is unavailable, and settle as dropped when the target conversation is ignored or gone.
+ * Messages wait while processing is paused or their source is unavailable, and settle as dropped when the target conversation is ignored, gone, or permanently rejects the message.
  */
 export class Outbox implements OutboxPort {
   constructor(private readonly host: OutboxHost) {
@@ -25,8 +25,9 @@ export class Outbox implements OutboxPort {
   }
   /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
-    // Validate IM reply length here; acknowledgements are already validated when decided.
-    if (message.kind === 'reply' && message.channel.source === 'feishu') checkedImText(message.text)
+    // Validate IM reply length here against the Channel's own limit; acknowledgements are already validated when decided.
+    const limit = this.host.sources.words(message.channel.source)
+    if (message.kind === 'reply' && limit !== undefined) checkedImText(message.text, limit)
     const { store, effects } = this.host
     store.atomic(() => { if (store.receipts.add(message)) effects.enqueue('reply', message.id, {}) })
   }
@@ -44,9 +45,10 @@ export class Outbox implements OutboxPort {
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
-    // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
+    // A permanently unreachable target (such as a recalled message or deleted Issue) and a Channel's permanent
+    // rejection both settle as `channelGone`: the receipt prevents retries on a message that cannot be delivered.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')
-    store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
+    store.receipts.settle(receipt, result === 'sent' ? 'sent' : 'channelGone')
   }
 }

@@ -22,19 +22,17 @@ export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, 
 export interface SetupState {
   /** Resolved deployment facts; undefined while waiting for initial setup. */
   deployment?: Deployment | undefined
-  /** Setup failure that stops all Sources. */
-  problem?: SetupProblem | undefined
-  /** Feishu bot check failure that pauses only the Feishu Source. */
-  feishuProblem?: SetupProblem | undefined
+  /** Setup problems keyed by the settings card or Source kind that owns them. */
+  problems?: ReadonlyMap<string, SetupProblem> | undefined
 }
-export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
+export const problemOf = (id: string, setup: SetupState) => setup.problems?.get(id)
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
   if (!instance.installed) return 'missing'
   if (!instance.enabled) return 'off'
   if (problemOf(instance.id, setup) || parts.some(part => part.state === 'error')) return 'error'
-  if (setup.problem) return 'setup'
+  if (!setup.deployment) return 'setup'
   if (parts.some(part => part.state === 'starting')) return 'starting'
   return parts.some(part => part.state === 'paused') ? 'paused' : 'ready'
 }

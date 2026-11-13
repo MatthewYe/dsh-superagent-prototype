@@ -14,6 +14,15 @@ export const HEALTH_TEXT = {
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
+  slackBridgeUnset: 'The Source is on, and its slack-bridge is not set',
+  slackBridgeMissing: 'The slack-bridge executable cannot run',
+  slackTokenRevoked: 'Slack rejected the bot token',
+  slackAppUninstalled: 'The app was uninstalled from the workspace',
+  slackNotAMember: 'The bot is not a member of a configured conversation',
+  slackTeamChanged: 'The workspace does not match the configured team',
+  slackRateLimited: 'Slack rate limited the last call and the bridge is waiting to retry',
+  slackConnected: 'Connected to {team} as @{bot}',
+  slackFirstPass: 'Waiting for the first history pass',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
 export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string> }
@@ -34,10 +43,14 @@ export interface SourceContext {
   readonly ready: Promise<void>
   /** True once setup resolved the repository and accounts; Sources poll only then. */
   configured(): boolean
-  /** Setup problem keeping this Source's account from running; only the Feishu bot check reports one. */
+  /** Setup problem keeping this Source's account from running; the Feishu and Slack bot checks report one. */
   readonly problem?: SetupProblem | undefined
   /** Returns a Source's configuration while enabled, or undefined while disabled or uninstalled. */
   config<C extends Record<string, unknown>>(kind: string): C | undefined
+  /** The parsed policy part for a registered Source kind, including its admission table. */
+  policyPart<C>(kind: string): C | undefined
+  /** Saves a Source's policy part through the settings layer, preserving validation, versioning, and policy effects. */
+  savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
   /** Ingests a trigger into the Engine and schedules the next evaluation pass; callers should await completion before advancing read cursors. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   atomic<T>(work: () => T): T
@@ -63,5 +76,7 @@ export interface SourceContext {
   notify(message: OutboundMessage): void
   /** Reports the state of one of this kind's declared health entries; throws for undeclared entry names. */
   report(entry: string, health: Health): void
+  /** Reads one of this kind's declared health entries, or undefined while the kind is unregistered. */
+  healthOf(entry: string): Health | undefined
 }
 export const sourceContext = (host: SourceHost, kind: { kind: string; health: readonly string[] }): SourceContext => host.context(kind)

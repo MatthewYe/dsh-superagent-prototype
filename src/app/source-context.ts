@@ -18,12 +18,12 @@ export interface SourceContextDeps {
   readonly deployment: Deployment
   readonly ready: Promise<void>
   configured(): boolean
-  /** Setup problem whose `place` matches the Source kind receives it on `context.problem`. */
-  readonly setupProblem?: SetupProblem | undefined
-  /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
-  readonly feishuProblem?: SetupProblem | undefined
+  /** Setup problems keyed by the settings card or Source kind that owns them. */
+  readonly problems: ReadonlyMap<string, SetupProblem>
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
+  /** Saves one Source's policy part through the settings layer. */
+  savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
 }
 
 /**
@@ -38,11 +38,13 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    get problem() { return deps.problems.get(kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined
     },
+    policyPart: <C>(kind: string) => deps.sources.policyPart(kind) as C | undefined,
+    savePolicyPart: (kind, part) => deps.savePolicyPart(kind, part),
     receive: trigger => deps.receive(trigger),
     atomic: work => store.atomic(work),
     state: {
@@ -68,5 +70,6 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)
       health.get(entry)?.set(value)
     },
+    healthOf: entry => kind.health.includes(entry) ? health.get(entry)?.get() : undefined,
   }
 }

@@ -1,0 +1,177 @@
+/** Slack socket loop: run the bridge, translate admitted events, and report health. */
+import { z } from 'zod'
+import type { SetupProblem } from '../setup.ts'
+import { KV } from '../kv.ts'
+import { health, type Health, type SourceContext } from './host.ts'
+import { ConsumerFatal, supervise, type Consumer } from './loop.ts'
+import { checkSlackToken, markTokenEvent, reportSlackToken, slackAuthTest, type SlackAuthReply } from './slack-auth.ts'
+import { rememberSlackThread, runSlackHistory } from './slack-history.ts'
+import { SlackPolicySchema, type SlackPolicy } from './slack-policy.ts'
+import { slackProfile, type SlackProfile } from './slack-setup.ts'
+import { SOURCE, slackAdmitted, slackScope, slackTrigger } from './slack-trigger.ts'
+import type { SlackConfig } from './slack.ts'
+
+/** One bridge frame: `events_api` carries a team and an event; socket lifecycle frames carry only a type. */
+const SlackFrameSchema = z.object({
+  type: z.string(),
+  reason: z.string().optional(),
+  payload: z.object({
+    team_id: z.string(),
+    event_id: z.string().optional(),
+    event: z.object({ type: z.string() }).passthrough(),
+  }).passthrough().optional(),
+}).passthrough()
+
+const RevokedSchema = z.object({ bot: z.array(z.string()).optional() }).passthrough()
+
+/**
+ * The Slack health rows for the current configuration and setup state: an unconfigured Source pauses both, a failed
+ * profile check pauses both, a resolved profile connects `slack` and leaves `history:slack` waiting for its first pass.
+ */
+export function slackHealth(config: SlackConfig | undefined, profile: SlackProfile | undefined,
+  problem?: SetupProblem): { slack: Health; history: Health } {
+  if (!config) return { slack: health('paused', 'sourceOff'), history: health('paused', 'sourceOff') }
+  if (!config.cli) return { slack: health('paused', 'slackBridgeUnset'), history: health('paused', 'slackBridgeUnset') }
+  if (!profile) return { slack: problem ? { state: 'paused', detail: problem.detail } : health('paused', 'setupPending'),
+    history: health('paused', 'setupPending') }
+  return { slack: health('ready', 'slackConnected', { team: profile.team, bot: profile.name || profile.botId }),
+    history: health('starting', 'slackFirstPass') }
+}
+
+/** Handles one parsed bridge frame; throws `ConsumerFatal` when Slack says the app or its tokens are gone. */
+export async function handleFrame(ctx: SourceContext, frame: unknown, config: SlackConfig, profile: SlackProfile): Promise<void> {
+  const parsed = SlackFrameSchema.safeParse(frame)
+  if (!parsed.success) throw new Error('The slack-bridge printed a frame that is not a Slack event')
+  const value = parsed.data
+  if (value.type === 'disconnect') {
+    ctx.report('slack', { state: 'starting', detail: `Slack socket disconnected (${value.reason ?? 'unknown'}); reconnecting` })
+    return
+  }
+  if (value.type === 'app_rate_limited') {
+    ctx.report('slack', { state: 'ready', detail: 'Slack rate limited the app; the bridge is waiting to retry', code: 'slackRateLimited' })
+    return
+  }
+  if (value.type !== 'events_api' || !value.payload) return
+  if (value.payload.team_id !== profile.teamId) {
+    ctx.report('slack', health('error', 'slackTeamChanged'))
+    return
+  }
+  const event = value.payload.event
+  if (event.type === 'app_uninstalled') {
+    ctx.report('slack', health('error', 'slackAppUninstalled'))
+    throw new ConsumerFatal('The Slack app was uninstalled')
+  }
+  if (event.type === 'tokens_revoked') {
+    const revoked = RevokedSchema.safeParse(event.tokens)
+    const bot = revoked.success ? revoked.data.bot ?? [] : []
+    if (bot.includes(profile.userId) || bot.includes(profile.botId)) {
+      markTokenEvent(ctx)
+      ctx.report('slack', health('error', 'slackTokenRevoked'))
+      throw new ConsumerFatal('The Slack bot token was revoked')
+    }
+    return
+  }
+  if (event.type === 'app_rate_limited') {
+    ctx.report('slack', { state: 'ready', detail: 'Slack rate limited the app; the bridge is waiting to retry', code: 'slackRateLimited' })
+    return
+  }
+  const trigger = slackTrigger(event, { botId: profile.botId, userId: profile.userId },
+    { teamId: profile.teamId, url: profile.url })
+  if (!trigger) return
+  const scope = slackScope(trigger.meta, config)
+  if (!slackAdmitted(scope, trigger.addressed)) return
+  // Live traffic also tells the history pass which conversations the bot has already joined.
+  const conversation = String(trigger.meta.conversation)
+  const direct = trigger.meta.direct === true
+  const known = ctx.state.get(KV.slack.conversations) ?? {}
+  if (known[conversation] !== direct) ctx.state.set(KV.slack.conversations, { ...known, [conversation]: direct })
+  rememberSlackThread(ctx, trigger)
+  await ctx.receive(trigger)
+}
+
+/** Builds the supervised consumer that runs `slack-bridge listen` and lets `handleFrame` translate its stdout. */
+export function slackConsumer(config: SlackConfig, profile: SlackProfile, line: Consumer['line'],
+  onReady?: () => void | Promise<void>): Consumer {
+  return {
+    kind: SOURCE, name: 'Slack socket', command: config.cli, args: ['listen'], env: {},
+    ready: '[socket] ready', listening: `Connected to ${profile.team} as @${profile.name || profile.botId}`,
+    oversized: 'The slack-bridge printed a line over 1 MiB',
+    failure: (failures, error) => health('error', 'pollFailures', { count: String(failures), error: String(error) }),
+    line, onReady,
+  }
+}
+
+/**
+ * Compares the workspace `auth.test` reports with the policy's stored team: the first run records the observed team, and
+ * a different team refuses the loop because Slack user IDs only mean something inside their own workspace.
+ */
+async function checkWorkspace(ctx: SourceContext, reply: SlackAuthReply): Promise<{ refuse: boolean; health?: Health }> {
+  const observed = reply.team_id
+  if (!observed) return { refuse: false }
+  const part = ctx.policyPart<SlackPolicy>(SOURCE)
+  const stored = part?.teamId ?? ''
+  if (!stored) {
+    try {
+      await ctx.savePolicyPart(SOURCE, { ...(part ?? SlackPolicySchema.parse({})), teamId: observed })
+    } catch (error) {
+      // A concurrent roster sync may already have recorded the same team; anything else leaves the identity unknown.
+      if (ctx.policyPart<SlackPolicy>(SOURCE)?.teamId !== observed) {
+        return { refuse: true, health: { state: 'error',
+          detail: `Slack reported workspace ${observed}, but the policy could not record it: ${String(error)}`,
+          at: new Date().toISOString() } }
+      }
+    }
+    return { refuse: false }
+  }
+  if (stored === observed) return { refuse: false }
+  const name = reply.team ? `${reply.team} (${observed})` : observed
+  return { refuse: true, health: { state: 'error', code: 'slackTeamChanged',
+    detail: `Slack is connected to ${name}, but the policy stores the workspace ${stored}`, at: new Date().toISOString() } }
+}
+
+/**
+ * Runs `auth.test` once before the socket or history loops can admit Triggers. A bridge failure is left to the socket
+ * supervisor; without a reply there is no identity to compare.
+ */
+async function startupCheck(ctx: SourceContext): Promise<{ refuse: boolean; health?: Health; reply?: SlackAuthReply }> {
+  let reply: SlackAuthReply
+  try { reply = await slackAuthTest(ctx) } catch { return { refuse: false } }
+  if (reply.ok !== true) return { refuse: false, reply }
+  const workspace = await checkWorkspace(ctx, reply)
+  return { ...workspace, reply }
+}
+
+/** Reports the starting or paused health rows and, once a profile exists, supervises the socket. */
+export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+  await ctx.ready
+  if (signal.aborted) return
+  const config = ctx.config<SlackConfig>(SOURCE)
+  const profile = slackProfile(ctx.deployment)
+  const rows = slackHealth(config, profile, ctx.problem)
+  if (rows.slack.state !== 'ready') {
+    ctx.report('slack', rows.slack)
+    ctx.report('history:slack', rows.history)
+    return
+  }
+  ctx.report('slack', { state: 'starting', detail: `Connecting to ${profile!.team}` })
+  ctx.report('history:slack', rows.history)
+  const consumer = slackConsumer(config!, profile!, line => handleFrame(ctx, JSON.parse(line) as unknown, config!, profile!),
+    () => checkSlackToken(ctx, profile!).then(() => undefined))
+  await supervise(ctx, consumer, signal)
+}
+
+/** The Slack Source checks its workspace once, then runs its socket loop and its history, join, and name pass together. */
+export const runSlack = async (ctx: SourceContext, signal: AbortSignal): Promise<void> => {
+  await ctx.ready
+  if (signal.aborted) return
+  const config = ctx.config<SlackConfig>(SOURCE)
+  const profile = slackProfile(ctx.deployment)
+  let startup: { refuse: boolean; health?: Health; reply?: SlackAuthReply } = { refuse: false }
+  if (config?.cli && profile) startup = await startupCheck(ctx)
+  if (startup.refuse) {
+    if (startup.health) ctx.report(SOURCE, startup.health)
+    return
+  }
+  if (profile && startup.reply) reportSlackToken(ctx, profile, startup.reply)
+  await Promise.allSettled([watch(ctx, signal), runSlackHistory(ctx, signal)])
+}
