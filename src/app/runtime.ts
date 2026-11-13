@@ -110,7 +110,7 @@ export class Runtime extends Service implements SourceHost {
       const effects = this.effects = new Effects(store, board)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
-        if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
+        if (kind.policy?.sync) void this.ready?.then(() => this.syncSourceAfterDeployment(kind.kind))
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
@@ -224,6 +224,18 @@ export class Runtime extends Service implements SourceHost {
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+  }
+  /**
+   * Syncs a Source's member list once startup and the Source's deployment profile are ready.
+   * A plugin may register after startup resolved the deployment and probe it again a moment later, so the first sync waits
+   * for its profile instead of failing for a missing bridge and retrying only after a minute.
+   */
+  private async syncSourceAfterDeployment(id: string): Promise<void> {
+    await this.ready
+    if (!this.settings.syncable().includes(id)) return
+    for (let waited = 0; waited < 10_000 && !(this.setup.configured() && this.setup.deployment.sources[id]); waited += 250)
+      await new Promise<void>(resolve => setTimeout(resolve, 250))
+    if (this.settings.syncable().includes(id)) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
   }
   private httpHost(): HttpHost {
     const runtime = this

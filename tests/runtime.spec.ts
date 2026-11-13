@@ -623,12 +623,20 @@ it('refuses an accept through orchestrator_route for inferred candidates so proa
   expect(runtime.store.tickets.list()).toEqual([])
 })
 
-it('syncs a Source\'s list once its plugin loads after dsh-superagent started', async () => {
+it('syncs a Source\'s list once its plugin loads after dsh-superagent started, waiting for its deployment', async () => {
   const next = await restart()
   await next.ready
-  vi.mocked(Commands.prototype.lark).mockResolvedValue({ users: [{ member_id: MEMBER, name: 'Alice' }], has_more: false })
+  const syncedWithDeployment: boolean[] = []
+  vi.mocked(Commands.prototype.lark).mockImplementation(async () => {
+    syncedWithDeployment.push(!!next.deployment.sources.feishu)
+    return { users: [{ member_id: MEMBER, name: 'Alice' }], has_more: false }
+  })
   next.sources.register(feishuKind)
-  await vi.waitFor(() => expect(next.health['sync:feishu']).toMatchObject({ state: 'ready' }))
+  // A late Source plugin resolves its deployment profile a moment after registering, as the Slack plugin does;
+  // the first sync must wait for the profile instead of failing early.
+  setTimeout(() => { Object.assign(next.deployment.sources, { feishu: {} }) }, 100)
+  await vi.waitFor(() => expect(next.health['sync:feishu']).toMatchObject({ state: 'ready' }), { timeout: 5000 })
+  expect(syncedWithDeployment).toEqual([true])
 })
 
 it('syncs the Feishu part of the Policy from its sync chat in place, and keeps the Policy version when only the order the chat lists changes', async () => {
