@@ -10,4 +10,4 @@ The five canonical triage roles keep their default label strings (`needs-triage`
 
 ### Domain docs
 
-Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: the glossary is `GLOSSARY.md` at the repo root, and decision records are under `docs/adr/`. See `docs/agents/domain.md`.

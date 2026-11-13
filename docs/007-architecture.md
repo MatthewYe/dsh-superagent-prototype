@@ -437,6 +437,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
+| `tests/docker-deployment.spec.ts` | The image, the compose service and the published panel end to end in Docker: an unconfigured boot, configuration through the management API, every part ready, loopback-only listeners, the healthcheck, a restart on the same volume and a clean stop; skipped unless `DSH_DOCKER_E2E=1` |
+| `tests/docker-instance.spec.ts` | `scripts/docker-instance` against fake `security`, `gh`, `op` and `docker`: runtime modes, GitHub token resolution and validation, Keychain and model-key configuration errors, import-once, panel URL and idempotent stop cleanup, and the `livis` selector by argument or environment with its own service, volumes and no model-key requirement |
+| `tests/docker-livis.spec.ts` | Ticket #4 end to end in Docker: one image with both profiles and the Livis source plugin, the `livis` service seeded from a sanitised copy of the host state (fake refresh token, paused, no Sources), the plugin's `livis` health entry reporting a graceful authentication failure, panel login through the published port, imported settings and state preserved across a wrapper stop/start, one container per state volume, and both services side by side without port interference; skipped unless `DSH_DOCKER_E2E=1` |
+| `tests/docker-credentials.spec.ts` | Ticket #3 end to end in Docker: GitHub token resolution and validation, the in-image gh shim and `git ls-remote`, the DSH credential copy, one-time state import with an unchanged host copy, imported history and settings, a restart, and a real model reply when the key resolves; skipped unless `DSH_DOCKER_E2E=1` |
+| `tests/service-wrapper-e2e.spec.ts` | Ticket #5 end to end in Docker: `scripts/dsh-superagent` starts both instances with isolated Compose projects, host ports, state and artifacts, captures each panel URL and its `0600` file, reports JSON status, restarts on a fresh container and project volume, stops until status is `1` and `--respect-stop` skips recovery, and a copied wrapper delegates `--legacy` to a stubbed host implementation; skipped unless `DSH_DOCKER_E2E=1` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
@@ -607,6 +612,14 @@ Every plugin configuration key except `stateDir` is volatile. The panel's Deploy
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 
+## Deployment
+
+The product is one image built at a repository commit with a pinned DeepSeek Harness version. Each instance runs as one container from that image, with its own DSH home and state volumes, its own profile and its own loopback-published port. DeepSeek Harness keeps binding `127.0.0.1:3082` inside the container; an in-container relay exposes the panel and management API through a loopback-published port without changing the product's loopback-only `Host` and `Origin` checks. One container owns one state directory, because the orchestrator holds its lock and the database has one writer.
+
+The container is the DeepSeek Harness isolation boundary: upgrading DeepSeek Harness elsewhere on the host cannot change a running instance, and upgrading an instance is an explicit new image tag. [006 Deployment](006-deployment.md) has the commands; the decision, its rejected alternatives and its revisit conditions are in `docs/adr/0001-docker-deployment.md`.
+
+The credential path, the second `livis` instance and the Compose-driving `scripts/dsh-superagent` are part of the Docker path. The image is operator-bound through the `OPERATOR_HOME` / `OPERATOR_UID` / `OPERATOR_GID` build inputs; [006 Deployment](006-deployment.md) documents their neutral defaults and why each operator builds their own image. The opt-in Docker tests cover the image, relay, panel, management API, healthcheck, restart persistence, teardown, the credential plumbing, the one-time state import, and the `livis` instance with its plugin.
+
 ## Reviewing a change against real data
 
 Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
@@ -614,4 +627,3 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 ## Open questions
 
 - Trust: which Trigger fields are trusted, such as the Source's actor and Thread membership, and which are not, such as the body and quotes.
-- Deployment isolation: the agent's profile on its own pinned DeepSeek Harness installation, so upgrading DeepSeek Harness elsewhere does not break it.

@@ -1,0 +1,96 @@
+# Two containers, one image, one DSH instance each (tickets #2 and #4).
+#
+# The image is built locally by scripts/docker-build; the tag encodes the product
+# commit, the Livis plugin commit and the pinned DSH CLI version. Each service
+# publishes only on loopback: DSH itself listens on 127.0.0.1:3082 (superagent) or
+# 127.0.0.1:3083 (livis) inside the container, and the in-container relay on
+# 13082 / 13083 is the sole wildcard listener per container.
+#
+# Both services share one image. They differ only in profile, volume names,
+# published port and their absolute state directory. `scripts/docker-instance`
+# supplies credentials at start; Compose on its own does not.
+
+x-superagent-image: &superagent-image
+  image: ${SUPERAGENT_IMAGE:?build the image with scripts/docker-build first, or set SUPERAGENT_IMAGE}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    # The Livis plugin checkout is a named build context, not a vendored copy,
+    # so the plugin commit in the image is always the one docker-build recorded.
+    additional_contexts:
+      livis: ${LIVIS_DIR:-../dsh-livis}
+    args:
+      DSH_VERSION: ${DSH_VERSION:-0.2.1-rc.3}
+      PRODUCT_COMMIT: ${PRODUCT_COMMIT:-unknown}
+      LIVIS_COMMIT: ${LIVIS_COMMIT:-unknown}
+      IMAGE_TAG: ${SUPERAGENT_IMAGE:-dsh-superagent:local}
+      # The operator identity is baked into the image (home path and uid/gid).
+      # scripts/docker-build and scripts/docker-instance pass the real values by
+      # default; the neutral fallbacks let a fresh clone build without them.
+      OPERATOR_HOME: ${OPERATOR_HOME:-/home/operator}
+      OPERATOR_UID: ${OPERATOR_UID:-1000}
+      OPERATOR_GID: ${OPERATOR_GID:-1000}
+
+services:
+  superagent:
+    <<: *superagent-image
+    ports:
+      - "127.0.0.1:${SUPERAGENT_PUBLISH_PORT:-3082}:13082"
+    volumes:
+      # The profile home is private to the instance and writable by the operator.
+      - superagent-home:/data/dsh
+      # State lives under the operator home path baked into the image.
+      - "superagent-state:${OPERATOR_HOME:-/home/operator}/.dsh/state/superagent"
+    environment:
+      DSH_PROFILE: superagent
+      OPERATOR_HOME: ${OPERATOR_HOME:-/home/operator}
+      OPERATOR_UID: ${OPERATOR_UID:-1000}
+      OPERATOR_GID: ${OPERATOR_GID:-1000}
+      SUPERAGENT_STATE_DIR: "${OPERATOR_HOME:-/home/operator}/.dsh/state/superagent"
+      SUPERAGENT_TEMPLATE: /opt/superagent-template
+      SUPERAGENT_RELAY_PORT: "13082"
+      SUPERAGENT_TARGET_PORT: "3082"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/superagent-healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  livis:
+    <<: *superagent-image
+    ports:
+      - "127.0.0.1:${LIVIS_PUBLISH_PORT:-3083}:13083"
+    volumes:
+      # A separate home: the profile is seeded from /opt/livis-template.
+      - livis-home:/data/dsh
+      # The livis state, including the Livis source's client state.
+      - "livis-state:${OPERATOR_HOME:-/home/operator}/.dsh/state/livis"
+    environment:
+      DSH_PROFILE: livis
+      OPERATOR_HOME: ${OPERATOR_HOME:-/home/operator}
+      OPERATOR_UID: ${OPERATOR_UID:-1000}
+      OPERATOR_GID: ${OPERATOR_GID:-1000}
+      SUPERAGENT_STATE_DIR: "${OPERATOR_HOME:-/home/operator}/.dsh/state/livis"
+      SUPERAGENT_TEMPLATE: /opt/livis-template
+      SUPERAGENT_RELAY_PORT: "13083"
+      SUPERAGENT_TARGET_PORT: "3083"
+      # The plugin default follows the container HOME (/data/dsh); the state
+      # volume is mounted at the operator's absolute path, so point it there.
+      DSH_LIVIS_STATE_DIR: "${OPERATOR_HOME:-/home/operator}/.dsh/state/livis/livis-source"
+      # The livis profile uses the DSH credential store copied from the host by
+      # scripts/docker-instance (deepseek-account). It does not need the model key.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/superagent-healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  superagent-home:
+  superagent-state:
+  livis-home:
+  livis-state:
