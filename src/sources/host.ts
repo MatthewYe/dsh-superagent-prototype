@@ -51,6 +51,8 @@ export interface SourceContext {
   policyPart<C>(kind: string): C | undefined
   /** Saves a Source's policy part through the settings layer, preserving validation, versioning, and policy effects. */
   savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
+  /** Re-resolves the deployment after a Source plugin registered late; Sources call it once when their profile is missing. */
+  refreshDeployment?(): Promise<boolean>
   /** Ingests a trigger into the Engine and schedules the next evaluation pass; callers should await completion before advancing read cursors. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   atomic<T>(work: () => T): T

@@ -162,7 +162,8 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get problems() { return setup.problems }, receive: trigger => passes.receive(trigger),
-        savePolicyPart: (id, part) => runtime.settings.savePolicyPart(id, part) }
+        savePolicyPart: (id, part) => runtime.settings.savePolicyPart(id, part),
+        refreshDeployment: () => runtime.refreshDeployment() }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -195,6 +196,10 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
+  /** Re-runs setup so a Source kind whose plugin registered after startup is probed into the deployment. */
+  async refreshDeployment(): Promise<boolean> {
+    return this.setup.configured() ? this.setup.run(this.store.settings()) : false
+  }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }

@@ -137,7 +137,16 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(slackKind), 'slack: source kind')
   ctx.effect(() => {
     const controller = new AbortController()
-    const running = runSlack(sourceContext(ctx.orchestrator, slackKind), controller.signal)
+    const context = sourceContext(ctx.orchestrator, slackKind)
+    const running = (async () => {
+      await context.ready
+      if (controller.signal.aborted) return
+      // The kind may register after startup resolved the deployment; probe it again so the Source does not stay paused.
+      const instance = ctx.orchestrator.sources.instance<SlackConfig>('slack')
+      if (instance?.config.cli && context.configured() && !slackProfile(context.deployment))
+        await context.refreshDeployment?.().catch(() => false)
+      await runSlack(context, controller.signal)
+    })()
     return async () => { controller.abort(); await running }
   })
 }

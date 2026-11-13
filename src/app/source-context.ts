@@ -24,6 +24,8 @@ export interface SourceContextDeps {
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   /** Saves one Source's policy part through the settings layer. */
   savePolicyPart(kind: string, part: Record<string, unknown>): Promise<void>
+  /** Re-resolves the deployment after a Source plugin registers late. */
+  refreshDeployment?(): Promise<boolean>
 }
 
 /**
@@ -45,6 +47,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     },
     policyPart: <C>(kind: string) => deps.sources.policyPart(kind) as C | undefined,
     savePolicyPart: (kind, part) => deps.savePolicyPart(kind, part),
+    refreshDeployment: deps.refreshDeployment ? () => deps.refreshDeployment!() : undefined,
     receive: trigger => deps.receive(trigger),
     atomic: work => store.atomic(work),
     state: {
