@@ -44,7 +44,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
-The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md), and the Docker decision is recorded in [docs/adr/0001-docker-deployment.md](docs/adr/0001-docker-deployment.md).
+The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md), and the Docker decision is recorded in [docs/adr/0002-docker-deployment.md](docs/adr/0002-docker-deployment.md).
 
 ## Development
 

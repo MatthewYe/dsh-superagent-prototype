@@ -2,7 +2,7 @@
 
 Use this guide to build, run, configure, upgrade and troubleshoot dsh-superagent. Docker is the primary deployment: one image, one container per instance. `scripts/dsh-superagent` is the operator entry point: it drives Compose for the `superagent` and `livis` instances, keeps the four status exit codes, and delegates to the preserved host supervisor only when asked with `--legacy`. The host-profile installation is in the [appendix](#appendix-host-profile-installation) for development and the rollback window; `SETUP.md` follows that path.
 
-The chapter builds on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md). The root `GLOSSARY.md` fixes the deployment vocabulary, and `docs/adr/0001-docker-deployment.md` records why the stack is shaped this way.
+The chapter builds on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md). The root `GLOSSARY.md` fixes the deployment vocabulary, and `docs/adr/0002-docker-deployment.md` records why the stack is shaped this way.
 
 ## Instances and profiles
 

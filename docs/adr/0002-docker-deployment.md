@@ -1,4 +1,4 @@
-# Docker is the primary deployment
+# 0002 Docker is the primary deployment
 
 **Status:** accepted; implemented for the local Docker path. The image, the in-container relay, the healthcheck, both Compose services, the credentialled start path, the one-time state import, the operator wrapper and the `livis` instance with its plugin are implemented. The live relay-identity cutover (#7) is a follow-up.
 

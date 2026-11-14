@@ -1,4 +1,4 @@
-# 0001 Jarvis voice relay as a standard Source
+# 0003 Jarvis voice relay as a standard Source
 
 - **Status:** Accepted
 - **Date:** 2026-11-14
@@ -20,6 +20,8 @@ Four properties of the host decide much of the design:
 - **One Source instance per kind.** Several devices cannot be several instances of one kind. v1 admits one device and leaves several device configurations for later.
 
 The audio boundary is the other constraint. Jarvis already has devices, credentials and a reconnecting session; dsh-superagent should not learn any of that.
+
+This record was drafted as ADR 0001 on 2026-11-14 and renumbered to 0003 once ADRs 0001 (Slack) and 0002 (Docker) landed.
 
 ## Decision
 
