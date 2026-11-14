@@ -5,3 +5,4 @@ lib/
 coverage/
 .worktrees/
 .env.docker
+/.distill/
