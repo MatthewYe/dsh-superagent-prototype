@@ -43,6 +43,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): Docker-first build, run, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Slack Source](docs/009-slack.md): designing a Slack Source
+- [010 Jarvis Voice Source](docs/010-jarvis-voice-source.md): installing and operating the Jarvis source
 
 The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md), and the Docker decision is recorded in [docs/adr/0002-docker-deployment.md](docs/adr/0002-docker-deployment.md).
 
