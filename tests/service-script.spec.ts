@@ -600,6 +600,13 @@ printf '%s\\n' "$SUPERAGENT_IMAGE"
     expect(readFileSync(instance.trace, 'utf8')).toBe('')
   })
 
+  it('rejects the removed --legacy flag instead of delegating', async () => {
+    const instance = harness()
+    const rejected = await instance.run('--legacy', 'status')
+    expect(rejected).toMatchObject({ code: 2, stderr: expect.stringContaining('unrecognized arguments: --legacy') })
+    expect(readFileSync(instance.trace, 'utf8')).toBe('')
+  })
+
   it('propagates missing configuration as exit 2 before Compose starts anything', async () => {
     const instance = harness()
     await serve(instance)
