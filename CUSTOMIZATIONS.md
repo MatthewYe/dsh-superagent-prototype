@@ -12,6 +12,7 @@ This repository is a personal fork of
 |------|------|--------|--------|
 | 2026-11-12 | repo | Marked this repository as a personal fork and added this customization log | c4b0be8 |
 | 2026-11-12 | docs | Documented Docker as the primary deployment, added the deployment glossary and the Docker deployment ADR (issue #6) | (this commit) |
+| 2026-11-15 | deployment | Moved both live instances from Docker to native macOS processes under tmux; made `scripts/dsh-superagent` host-native, moved the Docker wrapper to `scripts/dsh-superagent-docker`, added ADR 0004 and froze the Docker path as an experimental rollback-only option; the host-native deployment now documents the Slack Source and its host credential path alongside GitHub (PR #18, issues #1 and #7) | (this commit) |
 
 ## Syncing with upstream
 

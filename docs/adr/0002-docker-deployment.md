@@ -1,6 +1,6 @@
 # 0002 Docker is the primary deployment
 
-**Status:** accepted; implemented for the local Docker path. The image, the in-container relay, the healthcheck, both Compose services, the credentialled start path, the one-time state import, the operator wrapper and the `livis` instance with its plugin are implemented. The live relay-identity cutover (#7) is a follow-up.
+**Status:** Superseded by [ADR 0004](0004-host-native-deployment.md). The Docker path is kept as a frozen, experimental opt-in and as the rollback window; it is no longer the primary deployment.
 
 Run each dsh-superagent instance as its own container from an image built out of this repository, with the management API kept loopback-only and a small in-container relay making the panel reachable through a loopback-published port.
 

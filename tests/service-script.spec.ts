@@ -1,11 +1,11 @@
 /**
  * Process-level tests for the operator entry `scripts/dsh-superagent`.
  *
- * The first block drives the preserved host path through `--legacy` with stubbed
+ * The first block drives the primary host-native path directly, with stubbed
  * ps, tmux and dsh binaries. The second block stubs the container runtime
- * (`docker`, `docker compose`, gh, security and op) and asserts the Docker
- * argument mapping, readiness exit codes, image build/build-failure path and
- * instance isolation without needing a Docker daemon.
+ * (`docker`, `docker compose`, gh, security and op) and asserts the frozen
+ * `scripts/dsh-superagent-docker` argument mapping, readiness exit codes, image
+ * build/build-failure path and instance isolation without needing a Docker daemon.
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync }
@@ -56,9 +56,9 @@ afterEach(() => {
   sleepers = []
   rmSync(root, { recursive: true, force: true })
 })
-/** Run the operator entry through its legacy dispatcher against the stubbed host path. */
+/** Run the primary host-native operator entry against the stubbed host path. */
 function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), '--legacy', ...args],
+  return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), ...args],
     { env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_SUPERAGENT_PROFILE: '', DSH_SUPERAGENT_URL: '' },
       timeout: 20_000 },
     (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
@@ -242,6 +242,19 @@ it('does not signal a process that took the recorded service PID, and keeps a st
   expect(await run('stop', '--stop-timeout', '1')).toMatchObject({ code: 1, stderr: expect.stringContaining('Graceful stop timed out') })
   expect(existsSync(join(control('superagent'), 'manually-stopped'))).toBe(true)
 }, 20_000)
+it('keeps the old script name and --legacy flag working during migration', async () => {
+  const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_SUPERAGENT_PROFILE: '', DSH_SUPERAGENT_URL: '' }
+  const invoke = (script: string, ...args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve =>
+    execFile('python3', [join(root, 'scripts', script), ...args], { env, timeout: 20_000 },
+      (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
+  for (const result of [
+    await invoke('dsh-superagent-legacy', 'status', '--url', 'http://127.0.0.1:9'),
+    await invoke('dsh-superagent', '--legacy', 'status', '--url', 'http://127.0.0.1:9'),
+  ]) {
+    expect(result.code).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ pids: [], manually_stopped: false })
+  }
+}, 20_000)
 
 describe('Docker operator wrapper', { timeout: 30_000 }, () => {
   const roots: string[] = []
@@ -265,7 +278,7 @@ describe('Docker operator wrapper', { timeout: 30_000 }, () => {
 
   const invoke = (root: string, env: NodeJS.ProcessEnv, args: string[]) =>
     new Promise<{ code: number; stdout: string; stderr: string }>(resolve => execFile(
-      'python3', [join(root, 'scripts', 'dsh-superagent'), ...args], { env, timeout: 60_000 },
+      'python3', [join(root, 'scripts', 'dsh-superagent-docker'), ...args], { env, timeout: 60_000 },
       (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
 
   function harness(options: { image?: string; withImage?: boolean } = {}): Harness {
@@ -275,8 +288,7 @@ describe('Docker operator wrapper', { timeout: 30_000 }, () => {
     mkdirSync(join(root, 'home', '.config', 'op'), { recursive: true })
     writeFileSync(join(root, 'home', '.config', 'op', 'llm.env'),
       'DEEPSEEK_API_KEY=op://AI Keys/DeepSeek API Key/credential\n', { mode: 0o600 })
-    copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent'), join(root, 'scripts', 'dsh-superagent'))
-    copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent-legacy'), join(root, 'scripts', 'dsh-superagent-legacy'))
+    copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent-docker'), join(root, 'scripts', 'dsh-superagent-docker'))
     copyFileSync(join(import.meta.dirname, '..', 'scripts', 'docker-instance'), join(root, 'scripts', 'docker-instance'))
     writeFileSync(join(root, 'compose.yaml'), 'services: {}\n')
     writeFileSync(join(root, 'dsh', '.credentials.yaml'), 'deepseek-account\n')
@@ -578,14 +590,21 @@ printf '%s\\n' "$SUPERAGENT_IMAGE"
     })
   })
 
-  it('rejects non-Docker profiles, and dispatches them to the legacy path on request', async () => {
+  it('rejects non-Docker profiles and points at the host-native entry', async () => {
     const instance = harness()
     const rejected = await instance.run('status', '--profile', 'other')
-    expect(rejected).toMatchObject({ code: 2, stderr: expect.stringContaining('only superagent, livis are managed by Docker') })
+    expect(rejected).toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining('only superagent, livis are managed by Docker. Use scripts/dsh-superagent for a host-native profile.'),
+    })
     expect(readFileSync(instance.trace, 'utf8')).toBe('')
-    const legacy = await instance.run('--legacy', 'status', '--profile', 'other')
-    expect(legacy.code).toBe(1)
-    expect(JSON.parse(legacy.stdout)).toMatchObject({ pids: [], manually_stopped: false })
+  })
+
+  it('rejects the removed --legacy flag instead of delegating', async () => {
+    const instance = harness()
+    const rejected = await instance.run('--legacy', 'status')
+    expect(rejected).toMatchObject({ code: 2, stderr: expect.stringContaining('unrecognized arguments: --legacy') })
+    expect(readFileSync(instance.trace, 'utf8')).toBe('')
   })
 
   it('propagates missing configuration as exit 2 before Compose starts anything', async () => {

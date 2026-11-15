@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 /**
- * Opt-in process-level test for ticket #5: the operator wrapper
- * `scripts/dsh-superagent` drives the two Docker-backed instances through
+ * Opt-in process-level test for ticket #5: the frozen Docker wrapper
+ * `scripts/dsh-superagent-docker` drives the two Docker-backed instances through
  * `scripts/docker-instance`, with isolated Compose projects, host ports, state
- * directories and artifacts.
+ * directories and artifacts. Host-native deployment is primary (ADR 0004); this
+ * test runs only for the Docker rollback path.
  *
  * It is skipped unless `DSH_DOCKER_E2E=1`. Every project name and port is
  * unique to this run; the live `dsh-superagent-superagent` and
@@ -21,16 +22,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
  * token, model key, Livis refresh token or executor work is involved.
  *
  * The image is built once with `BUILDX_CONFIG=/tmp/dsh-buildx-ticket05`, as
- * `scripts/docker-build` asks when the sandbox blocks `~/.docker`. The legacy
- * fallback is stubbed rather than booting tmux: a copied wrapper runs a copied
- * stub in place of `scripts/dsh-superagent-legacy`, proving the argument
- * contract without touching the host path.
+ * `scripts/docker-build` asks when the sandbox blocks `~/.docker`.
  */
 
 vi.setConfig({ testTimeout: 20 * 60_000, hookTimeout: 45 * 60_000 })
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const WRAPPER = join(ROOT, 'scripts', 'dsh-superagent')
+const WRAPPER = join(ROOT, 'scripts', 'dsh-superagent-docker')
 const ENABLED = process.env.DSH_DOCKER_E2E === '1'
 const TIMEOUT = Number(process.env.DSH_DOCKER_E2E_TIMEOUT ?? 240_000)
 const SUPERAGENT_PORT = Number(process.env.DSH_DOCKER_E2E_WRAPPER_SUPERAGENT_PORT ?? 38086)
@@ -368,43 +366,5 @@ esac
     expect(offline.container).toBe('stopped')
     expect(offline.panel).toBeNull()
     expect(containerId(livis)).toBe('')
-  })
-
-  it('delegates --legacy to the preserved host implementation, stubbed here', () => {
-    const legacyRoot = join(scratch, 'legacy')
-    const legacyScripts = join(legacyRoot, 'scripts')
-    mkdirSync(legacyScripts, { recursive: true })
-    const copiedWrapper = join(legacyScripts, 'dsh-superagent')
-    copyFileSync(WRAPPER, copiedWrapper)
-    chmodSync(copiedWrapper, 0o755)
-    const recorded = join(legacyRoot, 'argv.json')
-    writeFileSync(join(legacyScripts, 'dsh-superagent-legacy'), `#!/usr/bin/env python3
-import json
-import os
-import sys
-
-with open(os.environ['LEGACY_ARGV_FILE'], 'w') as handle:
-    json.dump(sys.argv[1:], handle)
-`, { mode: 0o755 })
-
-    const delegated = run('python3', [copiedWrapper, '--legacy', 'status', '--profile', 'other', '--timeout', '12', '--stop-timeout', '34'], {
-      env: { ...process.env, LEGACY_ARGV_FILE: recorded, SUPERAGENT_ARTIFACTS_DIR: join(legacyRoot, 'artifacts') },
-      allowFailure: true,
-    })
-    expect(delegated.status).toBe(0)
-    const argv = JSON.parse(readFileSync(recorded, 'utf8')) as string[]
-    expect(argv.slice(0, 4)).toEqual(['status', '--profile', 'other', '--timeout'])
-    expect(Number(argv[4])).toBe(12)
-    expect(argv[5]).toBe('--stop-timeout')
-    expect(Number(argv[6])).toBe(34)
-    // The dispatch happens before the Docker instance check and creates no state.
-    expect(existsSync(join(legacyRoot, 'artifacts'))).toBe(false)
-
-    const unsupported = run('python3', [copiedWrapper, '--legacy', 'logs', '--profile', 'other'], {
-      env: { ...process.env, LEGACY_ARGV_FILE: recorded },
-      allowFailure: true,
-    })
-    expect(unsupported.status).toBe(2)
-    expect(unsupported.stderr).toContain('not supported by the legacy host path')
   })
 })
