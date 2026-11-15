@@ -2,7 +2,7 @@
 import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
-import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
+import { coreSetupProblem, usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
 import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
@@ -20,7 +20,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const { paused, load: { maxWorkers } } = state
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
-  const status = state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
+  const status = coreSetupProblem(state.setup) ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
     label: t('processingPaused') }
     : { tone: 'ongoing', label: t('executorRunning') }
   const action = paused ? 'resumeProcessing' : 'pauseProcessing'
@@ -28,7 +28,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
     <StatusHead hint={t('executionStatusIntro')} settings="execution" />
     <div className="dt-row-meta dt-status-line">
       <span className="dt-status-text" data-state={status.tone}>{status.label}</span>
-      {!state.setup.problem && <>
+      {!coreSetupProblem(state.setup) && <>
         <LabelValue label={t('executingLabel')}
           value={`${state.load.running} / ${maxWorkers}`} /><LabelValue label={t('queuedLabel')} value={state.load.queued} />
       </>}

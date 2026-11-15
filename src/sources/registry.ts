@@ -3,7 +3,8 @@ import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } f
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
-import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
+import type { SourceContext } from './host.ts'
+import { ChannelSendError, type ChannelLink, type ChannelLinks, type SourceInstance, type SourceKind, type SourceSetup, type TriggerContext, type VariableSpec } from './kind.ts'
 
 
 /**
@@ -41,6 +42,12 @@ export class SourceRegistry implements SourceScope {
     return new Map(names.flatMap(name => { const entry = this.health.get(name); return entry ? [[name, entry] as const] : [] }))
   }
   kind(id: string): SourceKind | undefined { return this.kinds.get(id) }
+  /** Every registered kind in registration order. */
+  all(): readonly SourceKind[] { return [...this.kinds.values()] }
+  /** Every registered kind that declares a deployment slot, in registration order. */
+  setups(): { kind: SourceKind; setup: SourceSetup }[] {
+    return [...this.kinds.values()].flatMap(kind => kind.setup ? [{ kind, setup: kind.setup }] : [])
+  }
   /** Every registered kind's instance ordered by ID, followed by stored instances whose kind is not installed (with their config kept as stored). */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
     const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind]), installed: true }))
@@ -89,14 +96,29 @@ export class SourceRegistry implements SourceScope {
     })
   }
   /**
-   * Sends a message idempotently through its Channel's kind; returns `'waiting'` while the kind is not installed, or
-   * `'gone'` when the target (or a kind without channels) can never receive it.
+   * Sends a message idempotently through its Channel's kind; returns `'waiting'` while the kind is not installed,
+   * `'gone'` when the target (or a kind without channels) can never receive it, and `'permanent'` when the Channel
+   * rejects the message itself and a retry cannot help.
    */
-  async send(message: OutboundMessage, commands: Commands): Promise<'sent' | 'gone' | 'waiting'> {
+  async send(message: OutboundMessage, commands: Commands): Promise<'sent' | 'gone' | 'waiting' | 'permanent'> {
     const kind = this.kinds.get(message.channel.source)
     if (!kind) return 'waiting'
-    return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
+    const host = {
+      commands,
+      report: (entry: string, value: Parameters<SourceContext['report']>[1]) => {
+        if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)
+        this.health.get(entry)?.set(value)
+      },
+    }
+    try {
+      return kind.channel ? await kind.channel.send(host, message) : 'gone'
+    } catch (error) {
+      if (error instanceof ChannelSendError && error.outcome === 'permanent') return 'permanent'
+      throw error
+    }
   }
+  /** The Channel's declared reply word limit, if its kind imposes one. */
+  words(source: string): number | undefined { return this.kinds.get(source)?.channel?.words }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
     const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)
     return link ?? { url: '', label: { zh: channel.source, en: channel.source } }

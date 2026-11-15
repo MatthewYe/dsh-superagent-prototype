@@ -57,8 +57,8 @@ describe('Source registry', () => {
     expect(sent).toEqual([message('probe')])
     // A kind that is not installed keeps its replies waiting; links to it have no page.
     expect(await sources.send(message('retired'), commands)).toBe('waiting')
-    expect(sources.link(message('probe').channel, {})).toEqual({ url: 'https://probe/r', label: { zh: '探针', en: 'Probe' } })
-    expect(sources.link(message('retired').channel, {})).toEqual({ url: '', label: { zh: 'retired', en: 'retired' } })
+    expect(sources.link(message('probe').channel, { sources: {} })).toEqual({ url: 'https://probe/r', label: { zh: '探针', en: 'Probe' } })
+    expect(sources.link(message('retired').channel, { sources: {} })).toEqual({ url: '', label: { zh: 'retired', en: 'retired' } })
     const trigger = { id: 't1', source: 'probe', threads: [{ source: 'probe', id: '1' }], actor: { source: 'probe', id: 'u' }, human: true,
       at: '', text: 'hi', meta: { id: 'm1' } }
     const context = sources.threadContext(trigger)!

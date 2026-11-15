@@ -27,7 +27,7 @@ const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.di
 interface Block {
   parse(value: unknown, sources: SourceRegistry, id: string): unknown
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
-  guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
+  guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin, sources: SourceRegistry): void
 }
 const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   policy: {
@@ -48,7 +48,7 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
     merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
     // Only the management panel may switch source accounts.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+    guard: (current, candidate, origin, sources) => { if (origin !== 'panel' && setupChanged(current, candidate, sources.all())) throw new UserError('panelOnlyAccounts') },
   },
 }
 
@@ -138,7 +138,7 @@ export class Settings {
   }
   /**
    * Validates and saves one settings block against its `revision`; a no-op save records no new revision, a changed policy
-   * version notifies affected open tickets, and changing a setup-read field (`SETUP_FIELDS`, such as an account CLI) or any
+   * version notifies affected open tickets, and changing a setup-read field (a registered kind's `setup.fields`, such as an account CLI) or any
    * change saved while waiting for setup (`!this.host.setup.configured()`) restarts `dsh-superagent` so setup runs again.
    * @param origin - Caller origin; restricts execution-environment and account-CLI changes to `'panel'` (a guardrail against prompt-injected tool calls, not an OS security boundary, since agents run shell commands; `origin` has no default so no caller receives panel privileges implicitly).
    * @returns Save outcome with the block's current `revision`, whether `policy_changed`, whether `restarting`, and `context_delivery` status (`'injected'` or `'pending'`).
@@ -163,8 +163,8 @@ export class Settings {
       try { await resolveRoleModel(this.host.context, model) }
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
-    rules.guard?.(current, candidate, origin)
-    if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
+    rules.guard?.(current, candidate, origin, sources)
+    if (setupChanged(current, candidate, this.host.sources.all())) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
@@ -173,7 +173,7 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
+    const restarting = setupChanged(old, settings, this.host.sources.all()) || !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
@@ -241,7 +241,8 @@ export class Settings {
       if (JSON.stringify(part) !== JSON.stringify(policy.sources[id])) {
         await this.save('policy', { ...policy, sources: { ...policy.sources, [id]: part } }, revision, 'sync')
       }
-      health.set({ state: 'ready', detail: `${part.allowed.length} allowed`, at: now() })
+      const detail = sources.kind(id)?.policy?.sync?.detail
+      health.set({ state: 'ready', detail: detail ? detail(part) : `${part.allowed.length} allowed`, at: now() })
       this.retrySync(id, false)
       return part
     } catch (error) {
@@ -249,6 +250,18 @@ export class Settings {
       this.retrySync(id, true)
       throw error
     }
+  }
+  /**
+   * Saves one Source's policy part (such as an identity discovered at runtime) as a `'policy'` revision when it differs
+   * from the stored part, reusing `save` for validation, policy versioning, and effects.
+   * @throws SettingsConflict when the `'policy'` block changed while saving; the caller may re-read and retry.
+   */
+  async savePolicyPart(id: string, part: Record<string, unknown>): Promise<void> {
+    const { store } = this.host
+    const revision = store.blockRevision('policy')
+    const policy = store.settings().policy
+    if (JSON.stringify(part) === JSON.stringify(policy.sources[id])) return
+    await this.save('policy', { ...policy, sources: { ...policy.sources, [id]: part } }, revision, 'sync')
   }
   /**
    * Rereads a Source's display names (such as Feishu chat names) immediately.

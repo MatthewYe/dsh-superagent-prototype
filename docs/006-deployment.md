@@ -244,6 +244,7 @@ The image runs Debian bookworm slim with:
 - the `superagent` profile template generated from DeepSeek Harness's Web profile, with the product linked as a plugin, the web server on `127.0.0.1:3082` and the state directory at the absolute path below;
 - the `livis` profile template, likewise generated from the Web profile, with the product and `dsh-livis-source` linked, the web server on `127.0.0.1:3083`, the state directory at `${OPERATOR_HOME}/.dsh/state/livis` and `deepseek-account` / `deepseek-flash` as the default model;
 - the Livis source plugin at `/opt/dsh-livis/packages/dsh-livis-source`, built from the dsh-livis commit in the tag;
+- the Slack bridge at `/opt/dsh-superagent/lib/slack-bridge.js`, built by `pnpm build` and carrying its `@slack/socket-mode` and `@slack/web-api` runtime dependencies;
 - the tools setup and workers need: `git`, `git-lfs`, `gh`, `python3`, `jq`, `curl`, `socat`, `bash` and `tini`.
 
 It contains no credential, no copy of the operator's home directory and no source checkout. The entrypoint uses root only to seed the volumes and fix ownership, then runs the relay and DeepSeek Harness as `OPERATOR_UID`:`OPERATOR_GID` (the wrapper's `id -u` / `id -g` by default).
@@ -267,9 +268,9 @@ The Compose file defines two named volumes per instance:
 
 | Volume | Mounted at | Holds | Lost when |
 | --- | --- | --- | --- |
-| `superagent-home` | `/data/dsh` | profile, plugin link, DeepSeek Harness settings and the imported DSH credential | `docker compose down --volumes` |
+| `superagent-home` | `/data/dsh` | profile, plugin link, DeepSeek Harness settings, the imported DSH credential and the Slack bridge token | `docker compose down --volumes` |
 | `superagent-state` | `${OPERATOR_HOME}/.dsh/state/superagent` | orchestrator database, lock, command shims, git configuration, Tickets | `docker compose down --volumes` |
-| `livis-home` | `/data/dsh` | the livis profile, both plugin links and the imported DSH credential | `docker compose down --volumes` |
+| `livis-home` | `/data/dsh` | the livis profile, both plugin links, the imported DSH credential and the Slack bridge token | `docker compose down --volumes` |
 | `livis-state` | `${OPERATOR_HOME}/.dsh/state/livis` | orchestrator database, the `livis-source` client state and job journal, command shims, git configuration, Tickets | `docker compose down --volumes` |
 
 Named volumes keep the host's state directories out of the container's write path. The host copies at `~/.dsh/state/superagent` and `~/.dsh/state/livis` stay as they are, so a rollback does not depend on the container.
@@ -319,17 +320,41 @@ The image and the Compose file contain no token. That is deliberate: image layer
 
 - the GitHub token is resolved through `gh auth token` or the macOS Keychain, validated with `gh api user`, written as a 0600 `hosts.yml`, mounted read-only, and removed by `stop`;
 - the DSH credential store is copied into the private home volume on first start, not baked into the image; it supplies the `livis` profile's `deepseek-account` model record;
+- the Slack bridge token is stored by the operator on the instance's home volume, as described under [Slack app (optional)](#slack-app-optional); the image and the Compose file carry none;
 - the model key is passed only as the Compose process environment; it is never a file in the repository or image, and the `livis` start does not require it;
 - a missing or rejected GitHub token, missing DSH credential store for `livis`, or missing model key for `superagent` stops the start with exit code 2 and an actionable message.
 
 The image provides the same `gh-agent` path the imported `worker-gitconfig` and GitHub Source `cli` setting use. The entrypoint points it at the mounted container `hosts.yml`; git credential helpers therefore work without rewriting the imported state. A direct `docker compose up` without the runtime override still boots, but `gh` is unauthenticated and no model credential is present: use the wrapper for real work.
 
+### Slack app (optional)
+
+The image already carries the Slack bridge at `/opt/dsh-superagent/lib/slack-bridge.js`; `pnpm build` produces it, and its `@slack/socket-mode` and `@slack/web-api` dependencies are installed in the image. Socket Mode is an outbound WebSocket, so the Slack Source opens no inbound port and the container needs no extra publish.
+
+1. Open `https://api.slack.com/apps`, choose **Create New App → From an app manifest**, and pick the one workspace this installation serves. Paste a manifest with Socket Mode on, token rotation off, interactivity off, and these bot scopes: `app_mentions:read`, `channels:history`, `channels:read`, `channels:join`, `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `chat:write`, `files:read` and `users:read`. Subscribe the bot to `app_mention`, `message.channels`, `message.groups`, `message.im`, `app_uninstalled` and `tokens_revoked`.
+2. Choose **Install to Workspace** and approve, then copy the **Bot User OAuth Token** (`xoxb-…`). Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope and copy it (`xapp-…`).
+3. Store the tokens on the instance's home volume. The bridge reads `$HOME/.slack-dsh-superagent/config.json`, and `HOME` is `/data/dsh` in the container. `docker compose exec` runs as root by default, so pass the operator id the image runs as:
+
+   ```sh
+   docker compose exec -T --user "${OPERATOR_UID:-1000}" superagent \
+     node /opt/dsh-superagent/lib/slack-bridge.js auth <<'EOF'
+   {"bot_token":"xoxb-…","app_token":"xapp-…"}
+   EOF
+   docker compose exec -T --user "${OPERATOR_UID:-1000}" superagent \
+     node /opt/dsh-superagent/lib/slack-bridge.js api auth.test
+   ```
+
+   `auth` writes the file with mode `0600`; the second command prints the workspace and bot the setup probe also reads. Replace `superagent` with `livis` for the second instance. The file lives on the home volume, so it survives `up`, `restart` and `stop`; start a stopped instance before running the commands. The bridge also reads `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the process environment and those take precedence over the file, but neither the image nor the Compose file sets them.
+
+4. Point the Slack Source's `cli` at `/opt/dsh-superagent/lib/slack-bridge.js`.
+
+The installation belongs to the account that installed the app. If that account leaves the workspace, Slack revokes the token and the Source reports it until the app is reinstalled and the tokens are stored again. Keep the app internal: a Socket Mode app cannot be distributed through the Slack Marketplace.
+
 ## Configure an instance
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `${OPERATOR_HOME}/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
-2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
+1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `${OPERATOR_HOME}/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages. For Slack, set the bridge path, each conversation's mentions-only or all-messages mode, the other-conversation choice, the direct-message switch, and, under Advanced, the history page size and backfill days.
+2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**; with Slack, a conversation, with the workspace id and listed bots.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
    ```sh
@@ -352,7 +377,7 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 
 | Request | Answer |
 | --- | --- |
-| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
+| `GET state` | What every page reads: `setup`, with `problems`, a map from a settings card or Source kind such as `feishu` or `slack` to its setup problem, each with `place`, `code`, `values` and `detail`, `problem`, the first blocking problem (`null` when ready), `feishuProblem`, the Feishu Source's problem when present, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
 | `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
 | `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
@@ -371,7 +396,7 @@ Health entries are grouped by responsibility:
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
-| `github`, `feishu`, `history` | Source polling, events and history recovery |
+| `github`, `feishu`, `slack`, `history:feishu`, `history:slack` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
 
 A refusal has a status and `error`, its English text:
@@ -383,8 +408,8 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:github`, `source:feishu`, `source:slack`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`; Slack's has `cli`, `chats` as `[{"conversationId": "C…", "name": "…", "listen": "mentions"}]` (or `"all"`), `otherChats`, `directMessages`, `readPageSize` and `backfillDays`.
+- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}, "slack": {"teamId": "T…", "allowed": [{"id": "U…", "name": "…"}], "syncConversation": "C…", "bots": []}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
@@ -403,11 +428,11 @@ The CLI value is the Agent CLI path: `$HOME/.local/bin/gh-agent` on the host pat
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do; in the container, both run inside the container. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. It probes each enabled Source's account fields: Feishu's bot identity and Slack's bridge path, workspace and bot. A Feishu or Slack setup failure disables only that Source.
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the Feishu bot's CLI; `slack-bridge` runs the Slack bridge, or fails with `slack-bridge is unavailable: this installation has no Slack app.`; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
 - **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
@@ -476,11 +501,16 @@ The remaining setup and runtime rows apply to both paths:
 | `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in the appendix |
 | `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
 | `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| `The Slack bridge does not work.` | Point the Slack Source at the absolute path of `lib/slack-bridge.js` (or a command on `PATH`), and run `slack-bridge api auth.test` by hand |
+| `Slack rejected the bridge token: …` | Reinstall the app if needed, store fresh tokens with `slack-bridge auth`, then retry |
+| `The Slack bridge returned an answer dsh-superagent could not read.` | Run `slack-bridge api auth.test` by hand and fix what it prints |
+| Slack health says the bot token was revoked or the app was uninstalled | Reinstall the app to the workspace, store the new tokens with `slack-bridge auth`, and restart |
+| Slack health says the bot is not a member of a configured conversation | Invite the bot to that conversation, or remove the conversation from the Source card |
 | `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
 | The log says the plugin is incompatible with the running dsh | Use a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
-| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment |
+| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment. On Slack, check that the conversation is configured, the bot was invited, and the app's Socket Mode connection is healthy |
 
 These three apply only to the host-profile control script:
 
@@ -498,7 +528,7 @@ This is the pre-Docker installation kept for development and the rollback window
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
 - **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot for chat requests.
+- **Optional:** a Feishu bot or a Slack app for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
@@ -513,10 +543,11 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 ### Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
+- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh`, `lark-cli` or `slack-bridge` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model channel configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+- For Slack: the `slack-bridge` built from this bundle, and an internal Slack app with Socket Mode
 
 ### Accounts
 
@@ -560,6 +591,20 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
 
+#### Slack app for the host path
+
+Create the app and install it as described under [Slack app (optional)](#slack-app-optional). On this path build the bridge in the checkout and store the tokens with it:
+
+```sh
+pnpm build
+slack-bridge auth <<'EOF'
+{"bot_token":"xoxb-…","app_token":"xapp-…"}
+EOF
+slack-bridge api auth.test
+```
+
+`auth` writes `~/.slack-dsh-superagent/config.json` with mode `0600`. Point the Source's `cli` at the bridge's absolute path, usually `<checkout>/lib/slack-bridge.js`, or at the command `pnpm link --global` puts on `PATH`. The installation belongs to the account that installed the app; if that account leaves the workspace, Slack revokes the token and the Source reports it until the app is reinstalled and the tokens are stored again.
+
 ### Install
 
 Run this block once, on a machine that has no `superagent` profile yet:
@@ -580,7 +625,7 @@ Run the profile-creation command only for a new installation. If the profile alr
 
 ### Machine configuration
 
-Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
+Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there; for Slack, the `dsh-superagent-slack` entry. The `webserver` entry sets the panel's port.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -637,4 +682,4 @@ A database migrated by a newer version cannot be opened by an older one. Rollbac
 
 ### Try it
 
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.
+From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat. For Slack, mention the bot in a configured conversation or send it a direct message.

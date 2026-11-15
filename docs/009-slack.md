@@ -138,10 +138,14 @@ Modules table:
 | Path | Responsibility |
 | --- | --- |
 | `src/sources/slack.ts` | Slack Source kind: configuration, fields, scope, Channel, thread context, Policy part, environment, plugin entry. |
+| `src/sources/slack-auth.ts` | The `auth.test` checks shared by the socket loop and the history pass: workspace identity, the `slackTokenRevoked` and `slackConnected` health outcomes. |
 | `src/sources/slack-trigger.ts` | Translates Slack Socket Mode event envelopes into Triggers; deterministic Trigger and Thread ids; mrkdwn to text. |
-| `src/sources/slack-loop.ts` | Runs the `slack-bridge listen` consumer, its restart and health, and the per-conversation backfill and label loops. |
+| `src/sources/slack-loop.ts` | Runs the `slack-bridge listen` consumer, its restart and health, and admits live events. |
 | `src/sources/slack-channel.ts` | Sends replies through `chat.postMessage` and builds Slack archive links. |
 | `src/sources/slack-read.ts` | Reads Slack thread context and `slack/` resources for assessments and the Executor. |
+| `src/sources/slack-setup.ts` | Resolves the Slack deployment profile through `slack-bridge api auth.test` and owns the bridge setting schema. |
+| `src/sources/slack-history.ts` | Backfills history and tracked-thread replies, joins public conversations, and caches conversation names. |
+| `src/sources/slack-policy.ts` | Slack Policy schema and roster synchronization from one conversation's members. |
 | `src/sources/slack-bridge.ts` | The `slack-bridge` CLI: Socket Mode listener, Web API passthrough, and token configuration. |
 
 Tests table:
@@ -151,8 +155,13 @@ Tests table:
 | `tests/slack-trigger.spec.ts` | Event translation, self-echo, bot senders, subtypes, deterministic ids, mrkdwn to text. |
 | `tests/slack-read.spec.ts` | Thread context parts, pagination, the top-level fallback, edited text. |
 | `tests/slack-channel.spec.ts` | Reply shape, `thread_ts`, error mapping, links. |
-| `tests/slack.spec.ts` | Fake bridge: readiness, event stream, restart and backoff, health, backfill, stop. |
+| `tests/slack.spec.ts` | Config schema, scope, admission, and the reply limit. |
+| `tests/slack-loop.spec.ts` | Fake bridge end to end: readiness, events, restart and backoff, health, Outbox replies, stop. |
+| `tests/slack-backfill.spec.ts` | Cursor and window reads, pagination, threaded replies, joins, names, and failure health. |
+| `tests/slack-policy.spec.ts` | Policy schema, roster synchronization, and label refresh. |
+| `tests/slack-setup.spec.ts` | Slack config and bridge probe. |
 | `tests/slack-bridge.spec.ts` | Bridge argv, config permissions, `auth`, `api` passthrough, exit codes, signals. |
+| `tests/slack-bridge-build.spec.ts` | Built package entry and executable, and Slack SDK import isolation. |
 
 ## 5. The Source kind
 
@@ -356,7 +365,7 @@ export const slackChannel = (conversation: string, ts: string, options: { thread
 })
 ```
 
-A Trigger id contains the conversation. Two messages with the same timestamp in different conversations are different Triggers, and a reply and its parent are different Triggers in one Thread. The `ThreadRef.id` keeps the Feishu convention `<conversation>:<root ts>`; `threadKey` adds the `slack:` prefix.
+A Trigger id is `key('slack', '<conversation>:<ts>')`, a 32-hex hash rather than the conversation itself. Two messages with the same timestamp in different conversations are different Triggers, and a reply and its parent are different Triggers in one Thread. The `ThreadRef.id` keeps the Feishu convention `<conversation>:<root ts>`; `threadKey` adds the `slack:` prefix.
 
 Restarts must not replay events. The Engine's intake returns `'duplicate'` for a Trigger id that is already stored, and Socket Mode redelivery after a missing acknowledgement carries the same message, hence the same id. Backfill keeps a per-conversation cursor (section 12). The combination means a crash and restart neither loses a message that backfill covers nor re-asks the agent about one it has seen.
 
@@ -445,19 +454,22 @@ Slack identities are never mapped to Feishu or GitHub identities. The roster wri
 
 ### 10.1 Shape
 
-A reply is `chat.postMessage` with three fields:
+A reply is `chat.postMessage` with four fields, except for a DM, which omits `reply_broadcast`:
 
 ```ts
 {
   channel: address.conversation,
   text: message.text,
   thread_ts: address.thread_ts ?? address.ts,
+  reply_broadcast: true,
 }
 ```
 
+Slack DM channel ids start with `D`; channels and private groups start with `C` or `G`.
+
 No `client_msg_id` is sent: Slack requires a UUID there, while the receipt id is a 32-hex SHA-256 slice, and Slack documents no deduplication. Delivery stays at-least-once (section 10.4).
 
-Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. This is the rule that makes a DM behave like Feishu: each DM message starts its own Thread and the answer is posted under that message (section 16 of the ratified decisions). A top-level channel message starts a Thread the same way, so answers never sprawl into the channel.
+Every reply goes into a thread. For a top-level message the thread parent is the message itself, so `thread_ts` equals its `ts`; for a thread reply it is the Trigger's `thread_ts`. In a channel the copy is also broadcast into the channel (`reply_broadcast: true`), the equivalent of ticking "Also send to #channel" in the Slack client, so a mention's answer is visible in the channel as well as in its thread. A DM omits `reply_broadcast`, because Slack has no channel to broadcast to; each DM message keeps its own Thread and the answer is posted under that message (section 16 of the ratified decisions), so DM answers stay thread-only.
 
 There is no Block Kit, no `blocks`, no `markdown_text`, no `chat.update`, and no streaming API in v1. The agent's text is sent as `text` in mrkdwn. Mentioning people is not part of the reply contract; if an agent writes `@someone`, Slack renders the plain text and does not notify them, because a real notification needs `<@U…>` syntax.
 
@@ -532,6 +544,7 @@ Socket Mode does not promise delivery while the consumer is down. There is no "e
 - Later, a pass reads from `cursor - 5 seconds` to the loop start, capped at `now - backfillDays` (default 14, maximum 14). Five seconds of overlap covers a message that arrived while the previous page was being read; the Trigger id makes the overlap harmless.
 - The read is `conversations.history` with `oldest` and `latest` and `limit: 200`, newest first. Pages are collected, sorted ascending by `ts`, and emitted oldest-first, so the agent sees a conversation in order even though the API returns it backwards.
 - A message with `reply_count > 0` or a `latest_reply` newer than the cursor is followed by `conversations.replies` pages for that thread, also oldest-first. A reply that arrived after its parent but before the cursor window is still read.
+- The pass also follows the thread roots the agent is engaged in. Every admitted live message and every admitted history Trigger records its root in `KV.slack.threads(conversation)` with the time of that engagement. Each pass reads `conversations.replies` with `oldest = cursor - 5 seconds` for the newest such roots, keeping at most 100 roots per conversation whose last engagement is within 14 days. Roots outside either bound are dropped, so the follow-up set cannot grow without limit. This is how a reply to a root older than the current history page still becomes a Trigger; the deterministic Trigger id keeps any overlap harmless.
 - Translation is the same function as for live events. A message that was already a Trigger returns `duplicate` from intake and costs nothing.
 - Skipped messages are the bot's own, the edit and delete subtypes, and messages in conversations that `scope` refuses. `message_changed` in history appears as the current text of the message, not as a separate entry.
 - The cursor advances to the loop start time only after a successful pass; an error leaves it in place and reports `history:slack`.
@@ -646,20 +659,29 @@ The fake is a real process, so readiness timeouts, restarts, backoff, and health
 
 `src/sources/feishu-loops.ts` contains the spawn, readiness, restart, backoff, health, and stop logic for the Feishu event consumer. Slack needs the same logic with different argv, a different readiness line, and a different exit message. Copying it would duplicate the most failure-sensitive code in the Source layer.
 
-Extract it to `src/sources/loop.ts`:
+Extract it to `src/sources/loop.ts`, whose exported `Consumer` carries the kind it reports under, its argv and added environment, its readiness and listening lines, and its oversized-line text:
 
 ```ts
+export class ConsumerFatal extends Error
+
 export interface Consumer {
-  /** Name used in health details and in the exit error, for example "Slack socket". */
+  /** Source kind: the consumer runs while its configuration is present and reports this health entry. */
+  kind: string
+  /** Name used in diagnostics and health details, for example "Slack socket". */
   name: string
-  /** Program and arguments, resolved by the deployment profile. */
   command: string
   args: string[]
+  /** Variables added to the inherited environment; PATH is inherited unchanged. */
   env: Record<string, string>
   /** Readiness line on stderr, for example "[socket] ready". */
   ready: string
-  /** Called for each stdout line, in order. Rejections restart the consumer. */
+  /** Health detail reported while the consumer is ready. */
+  listening: string
+  /** Error text for a stdout line over 1 MiB. */
+  oversized: string
+  /** Called for each stdout line, in order; a rejection is reported on the kind's health entry. */
   line: (line: string) => void | Promise<void>
+  failure?: (failures: number, error: unknown) => Health
   timeoutMs?: number
 }
 
@@ -670,14 +692,14 @@ export function supervise(ctx: SourceContext, consumer: Consumer, signal: AbortS
 export function consumerRetry(previous: number | undefined, ranMs: number): number
 ```
 
-The helper reproduces the Feishu behaviour exactly:
+The helper:
 
-- Waits for `ctx.ready` and for the enabled check before spawning.
-- Spawns with a 1 MiB line limit, strips `worker-bin` from PATH, and sets the environment the caller passes.
-- Treats stderr lines that equal `ready` as readiness; a timeout reports `<name> did not become ready within 45 seconds` as the diagnostic and stops the child.
-- Handles stdout lines strictly sequentially; a rejected handler restarts the consumer.
-- On exit reports `<name> exited (<code>, ready=<bool>): <diagnostic>` and restarts with `consumerRetry`.
-- Updates the kind's health entry through `ctx.report`, and stops the child on abort, waiting for it before resolving.
+- Waits for `ctx.ready`, and before each spawn, and every 5 seconds while running, checks that the kind's configuration is present. An absent configuration reports `paused` with `sourceOff` and waits 5 seconds instead of spawning.
+- Spawns with `{...process.env, ...consumer.env}`; it does not change `PATH`, so the command shims, not the supervisor, are what remove `worker-bin` before running a target.
+- Treats an stderr line starting with `ready` as readiness and reports the `listening` line; stderr lines that match `WARN|drop|error` report error health. A timeout reports `<name> did not become ready within <n> seconds` as the diagnostic and stops the child.
+- Reads stdout lines strictly sequentially. A line over 1 MiB is rejected after it has been read, with `consumer.oversized` as the error; a rejected `line` handler reports the kind's health entry and the consumer keeps running, so one bad frame does not restart the socket.
+- Stops the child on abort by closing stdin and sending `SIGTERM`, and waits for it and the line chain before resolving.
+- On exit reports `failure(failures, error)` or `<name> exited (<code>, ready=<bool>): <diagnostic>`, and restarts with `consumerRetry`. A thrown `ConsumerFatal` stops the consumer for good and is not restarted; the handler reports first.
 
 The Feishu watch loop keeps its argv, environment, readiness line `[event] ready`, and the error text, and calls the helper. Its tests keep the same assertions on readiness, restart numbers, and health, so the migration is provable rather than plausible.
 
@@ -690,7 +712,7 @@ The Feishu watch loop keeps its argv, environment, readiness line `[event] ready
 | `name` | `Slack socket` |
 | `command` | the configured `cli` |
 | `args` | `['listen']` |
-| `env` | the inherited environment plus `SLACK_BRIDGE_CONFIG` when the deployment profile names a non-default file |
+| `env` | empty; the bridge inherits the Source process's environment, where `SLACK_BRIDGE_CONFIG` can point at a non-default token file (the default is `~/.slack-dsh-superagent/config.json`) |
 | `ready` | `[socket] ready` |
 | `line` | parse the envelope; for `events_api`, translate and `ctx.receive`; for `disconnect`, report the reason in the health detail |
 
@@ -774,7 +796,7 @@ The Feishu kind's `setup` wraps `resolveFeishuBot` unchanged, with `fields: ['cl
 
 The HTTP setup payload becomes `problems: Record<string, { code: string; message: string }>`, keyed by kind; no Feishu-specific key remains in state or the panel. A Source card reads its problem from `problems[<kind>]`.
 
-The `setupFields` change-detection function iterates the registered kinds and serializes the named keys, preserving its current JSON-array comparison so that editing a CLI path still restarts the services. A kind without `setup` (GitHub is not a kind, but an experimental Source might be) contributes no fields and no probe.
+The `setupFields` change-detection function iterates the registered kinds and serializes the named keys, preserving its current JSON-array comparison so that editing a CLI path still restarts the services. A kind without `setup` contributes no fields and no probe.
 
 ### 15.4 Migration and compatibility
 
@@ -983,7 +1005,7 @@ The second variable is named `CONVERSATION`, not `CHAT`, to match the terminolog
 
 ### 17.2 The PATH shim
 
-`src/infra/environment.ts` adds `slack-bridge` to `WORKER_COMMANDS`, so a blocked-command setting cannot block it, and writes a shim like the `lark-cli` one when a Slack profile exists:
+`src/infra/environment.ts` adds `slack-bridge` to `WORKER_COMMANDS`, so a blocked-command setting cannot block it, and always writes a shim like the `lark-cli` one:
 
 ```sh
 #!/bin/sh
@@ -992,7 +1014,7 @@ PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$DSH_SUPERAGENT_WORKER_BIN
 exec "/path/to/slack-bridge" "$@"
 ```
 
-When no Slack profile exists, the shim is not written and any use fails with "slack-bridge is unavailable: this installation has no Slack app.", the wording pattern used for `lark-cli`. The shim removes `worker-bin` from PATH before exec, so recursion is impossible even if the configured path is a bare `slack-bridge`.
+With a Slack profile the shim execs the configured path. Without one it prints `slack-bridge is unavailable: this installation has no Slack app.` and exits 1, the wording pattern used for `lark-cli`; the shim is still written so the command exists and fails with one clear sentence rather than `not found`. The shim removes `worker-bin` from PATH before exec, so recursion is impossible even if the configured path is a bare `slack-bridge`.
 
 ### 17.3 The skill
 
@@ -1005,7 +1027,7 @@ When no Slack profile exists, the shim is not written and any use fails with "sl
 - identity rules: a Slack id is not a GitHub or Feishu account, and `users.info` needs `users:read`;
 - limits: no images or files in v1.
 
-`src/app/skill-files.ts` gains `slack: load('slack')`; `src/app/context.ts` adds `slack` to `sourceSkills`; `src/app/prompts.ts` adds `'skill/slack'` to `PART_KEYS` with the same `${sourceSkills.slack}\n\n## CLI usage\n${cliNotes}` template as Feishu, and `src/app/sessions.ts` and `src/app/http.ts` accept the third built-in skill name. Locales add `promptPart.skill/slack` and the skill name.
+`src/app/skill-files.ts` gains `slack: load('slack')`; `src/app/context.ts` adds `slack` to `sourceSkills`; `src/app/prompts.ts` adds `'skill/slack'` to `PART_KEYS` with the same `${sourceSkills.slack}\n\n## CLI usage\n${cliNotes}` template as Feishu, and `src/app/sessions.ts` and `src/app/http.ts` accept the third built-in skill name. Locales add the `promptPart.skill/slack` label.
 
 The prompts keep the generic sentence "Chat messages are one sentence by default, with a hard limit of 100 words." No Slack-specific wording is added to a prompt that Feishu users also read, and no Feishu wording is copied into the Slack part. The skill describes Slack mechanics; the shared parts describe the rules.
 
@@ -1018,7 +1040,7 @@ The implementation touches these files. The table is the debt list: each row is 
 | `src/sources/kind.ts` | add `ChannelLinks.sources`, `SourceChannel.words`, `SourceKind.setup` | per-source profiles, per-Channel word limit, kind-provided probes |
 | `src/sources/loop.ts` | new shared supervisor (Phase 0b) | one copy of spawn/readiness/restart/backoff/stop |
 | `src/sources/slack*.ts` | new modules | the Source itself |
-| `src/deployment.ts` | `Deployment.sources`, `resolveSlackBot`, no `SETUP_FIELDS` | per-source slots |
+| `src/deployment.ts` | `Deployment.sources`, `resolveSlackProfile`, no `SETUP_FIELDS` | per-source slots |
 | `src/setup.ts` | `SetupPlace` becomes a kind string, Slack codes | one problem per kind |
 | `src/app/setup.ts` | map of problems, loop over kinds, probe per kind | no third special case |
 | `src/app/source-context.ts` | `problems` map | each kind reads its own problem |
@@ -1061,7 +1083,7 @@ Phase 0 is required before any Slack code. Later phases may land as separate com
 
 **Phase 3: the kind and the loops.** `slack.ts` and `slack-loop.ts`, with the fake-bridge test. Acceptance: a fake stream produces Tickets; a killed consumer restarts with the documented backoff; health moves `starting → ready → error → ready`; backfill reads a gap once with five seconds of overlap and never duplicates.
 
-**Phase 4: setup, policy, panel, environment, prompts.** The `setup` member, `resolveSlackBot`, roster sync, the join check, the bridge shim, the skill, and the docs. Acceptance: a fresh install shows the Slack card and probe; Sync now fills the roster in a stable order; the worker sees both variables and can call `slack-bridge api`; the skill renders in the panel and the prompt.
+**Phase 4: setup, policy, panel, environment, prompts.** The `setup` member, `resolveSlackProfile`, roster sync, the join check, the bridge shim, the skill, and the docs. Acceptance: a fresh install shows the Slack card and probe; Sync now fills the roster in a stable order; the worker sees both variables and can call `slack-bridge api`; the skill renders in the panel and the prompt.
 
 **Phase 5: verification.** `pnpm vitest run`, the TypeScript build, and a manual walkthrough against a real workspace as in section 16.9. Acceptance: the documentation test passes, including the new 007 rows; a mention, an all-messages channel, a DM, a thread reply, and a restart after downtime all produce exactly one Ticket each.
 

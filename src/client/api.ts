@@ -118,6 +118,9 @@ export function caller(messages: () => ApiMessages): Call {
 
 export type StateView = ApiResponse<'GET state'>
 export type SetupView = StateView['setup']
+/** The setup problem that halts the service, if any: the Deployment or GitHub card is the one that blocks all work. */
+export const coreSetupProblem = (setup: SetupView | undefined): SetupProblem | undefined =>
+  setup?.problems.deployment ?? setup?.problems.github
 export type SettingsView = ApiResponse<'GET settings'>
 export type Settings = { [B in keyof SettingsView['blocks']]: SettingsView['blocks'][B]['value'] }
 export type SourceView = SettingsView['sources'][number]

@@ -11,7 +11,7 @@ import { InfoTip, Input } from './controls.tsx'
 import { SaveBar, useDraft } from './draft.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
-import { setupText, type T } from './text.ts'
+import { localized, sourceLabel, setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
 
 export type DeploymentForm = ConfigPageForm | undefined
@@ -53,17 +53,20 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
     <Input type="number" min={LIMITS[key].min} max={LIMITS[key].max} step={1} value={draft.value[key]} disabled={!editable}
       onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
   </Field>
-  const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId
-    : setup.feishuProblem ? setupText(t, setup.feishuProblem) : t('deploymentFeishuNone')
+  const sources = accounts ? Object.entries(accounts.sources) : []
+  const problem = setup.problems.deployment ?? setup.problems.github
   return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <Hint>{t('deploymentIntro')}</Hint>
-      {setup.problem && <div className="dt-row-buttons">
-        <p className="dt-error" role="status"><SetupMessage problem={setup.problem} lead /></p><CheckSetupButton />
+      {problem && <div className="dt-row-buttons">
+        <p className="dt-error" role="status"><SetupMessage problem={problem} lead /></p><CheckSetupButton />
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
         <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? '—'],
-          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
+          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'],
+          ...sources.map(([kind, entry]) => [sourceLabel(t, kind, entry.title),
+            Object.values(entry.facts).map(fact => localized(t, fact)).filter(Boolean).join(' ')
+              || (setup.problems[kind] ? setupText(t, setup.problems[kind]) : t('deploymentSourceNone'))] as [string, string])]} />
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>

@@ -1,6 +1,6 @@
 /** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import type { SearchView } from './api.ts'
+import { type SearchView } from './api.ts'
 import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
@@ -73,7 +73,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   const go = (route: Route) => () => { onClose(); navigate(route) }
   return <div className="dt-search-results" role="region" aria-label={t('searchLabel')}>
     <div className="dt-search-head">
-      <span className="dt-hint">{empty ? t(setup?.accounts?.feishu ? 'searchNone' : 'searchNoneGithub')
+      <span className="dt-hint">{empty ? t(setup?.accounts && Object.keys(setup.accounts.sources).length ? 'searchNone' : 'searchNoneGithub')
         : t(result.items.length >= 20 ? 'searchFoundCapped' : 'searchFound', counts)}</span>
       <Button variant="ghost" size="sm" icon={<Icon name="close" size={14} />} aria-label={t('close')} onClick={onClose} />
     </div>

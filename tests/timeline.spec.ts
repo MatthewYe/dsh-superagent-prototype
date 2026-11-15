@@ -20,7 +20,7 @@ beforeEach(() => {
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
 const sources = new SourceRegistry(() => SettingsSchema.parse({}))
 sources.register(githubKind)
-const host = () => ({ store, sources, links: (channel: ChannelRef) => githubLink(channel.address, {}) })
+const host = () => ({ store, sources, links: (channel: ChannelRef) => githubLink(channel.address, { sources: {} }) })
 const engine = () => new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(SettingsSchema.parse({}), sources),
   assessor: { request: () => {} }, executor: { start: async () => {}, deliver: async () => {}, stop: async () => {} },
   outbox: { send: () => {}, status: () => undefined, withdraw: () => {} } })

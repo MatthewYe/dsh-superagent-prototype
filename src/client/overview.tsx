@@ -1,12 +1,13 @@
 /** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and Executor load. */
 import type { ReactNode } from 'react'
-import { usePoll, type Problem } from './api.ts'
+import { coreSetupProblem, usePoll, type Problem } from './api.ts'
 import { Button, Icon } from './controls.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
 import { CheckSetupButton, ConfirmButton, Hint, LoadState, Section, SetupMessage } from './widgets.tsx'
+import type { DshSuperagentKey } from './locales.ts'
 
 function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () => Promise<void> }) {
   const { t, call, navigate } = usePanel()
@@ -25,9 +26,12 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
   const worded = (text: string) => <p className="dt-error">{text}</p>
   switch (problem.kind) {
     // A failed Feishu bot check pauses only the Feishu Source; other setup problems halt the entire service.
-    case 'setup': return row(t(problem.place === 'feishu' ? 'problemSetupFeishu' : 'problemSetup'), <p className="dt-error"><SetupMessage
-      problem={problem} /></p>,
-      setupPage(problem.place), t(`problemSetupFix.${problem.place}`), <CheckSetupButton />)
+    case 'setup': {
+      const title = `problemSetup.${problem.place}` as DshSuperagentKey
+      return row(t(title) === title ? t('problemSetup') : t(title), <p className="dt-error"><SetupMessage
+        problem={problem} /></p>,
+      setupPage(problem.place), t(`problemSetupFix.${problem.place}` as DshSuperagentKey), <CheckSetupButton />)
+    }
     case 'no-source': return row(t('problemNoSource'), undefined, settingsRoute('source'), undefined, go(t('actionOpenSources'),
       settingsRoute('source')))
     case 'no-allowed': return row(t('problemNoAllowed'), undefined, settingsRoute('eval'), undefined, go(t('actionAddAllowed'),
@@ -93,7 +97,7 @@ export function OverviewPage() {
     </Section>
     <Section title={t('term.executor')} action={more({ page: 'execution' })}>
       {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
-      {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
+      {coreSetupProblem(setup) ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
         {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
         {stat(t('queuedLabel'), data.executor.queued)}
         {stat(t('idleLabel'), data.executor.idle)}

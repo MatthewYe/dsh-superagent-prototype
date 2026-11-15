@@ -30,7 +30,7 @@ describe('account-isolated operations', () => {
     } finally { delete process.env.GH_TOKEN }
   })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
-    await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
+    await expect(new Commands(() => testDeployment({ sources: {} }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
   })
   it('reconciles an uncertain GitHub send with its stable marker', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
@@ -114,13 +114,13 @@ describe('Channels', () => {
     expect(gh.mock.calls[1]![0]).toEqual(post)
   })
   it('link each address to its page with its label', () => {
-    const links = { repository: REPOSITORY, feishu: deployment.feishu! }
+    const links = { repository: REPOSITORY, sources: { feishu: deployment.sources.feishu! } }
     expect(githubKind.channel!.link(githubChannel(8).address, links)).toEqual({ url: `https://github.com/${REPOSITORY}/issues/8`,
       label: { zh: 'GitHub #8', en: 'GitHub #8' } })
     const review = `https://github.com/${REPOSITORY}/pull/8#discussion_r7`
     expect(githubKind.channel!.link(githubChannel(8, review).address, links))
       .toEqual({ url: review, label: { zh: 'GitHub #8 的 review 讨论', en: 'Review discussion on GitHub #8' } })
-    expect(githubKind.channel!.link(githubChannel(8).address, {}).url).toBe('')
+    expect(githubKind.channel!.link(githubChannel(8).address, { sources: {} }).url).toBe('')
     const message = feishuChannel('oc_1', 'om_1').address
     expect(feishuKind.channel!.link(message, links)).toEqual({ url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1',
       label: { zh: '飞书消息', en: 'Feishu message' }, triggerId: key('feishu', 'om_1') })

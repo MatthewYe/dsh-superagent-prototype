@@ -12,6 +12,11 @@ export const localized = (t: T, text: Localized | string | undefined): string =>
   typeof text === 'string' ? text : text ? text[t('lang') === 'en' ? 'en' : 'zh'] : ''
 export const actorName = (t: T, actor: { name?: Localized } | undefined): string => actor?.name ? localized(t, actor.name)
   : t('automatedNotice')
+export function sourceLabel(t: T, kind: string, title: Localized): string {
+  const key = `deploymentSource.${kind}` as DshSuperagentKey
+  const label = t(key)
+  return label === key ? localized(t, title) : label
+}
 export function valueLabel(t: T, group: string, key: string | undefined): string {
   if (!key) return ''
   const name = `${group}.${key}` as DshSuperagentKey

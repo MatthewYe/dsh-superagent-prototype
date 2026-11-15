@@ -1,7 +1,7 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
 import { useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
-import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
+import { coreSetupProblem, usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
 import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
@@ -100,7 +100,7 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
   const { dot, label: state } = sourceMark(t, source.state)
   const { received, filtered, lastAt } = source.stats
   // Omit healthy parts and suppress per-part notes when a setup problem already explains why the Source is stopped.
-  const notes = source.enabled && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
+  const notes = source.enabled && !problem && !coreSetupProblem(setup) ? source.health.filter(item => item.state === 'error'
     || item.state === 'paused') : []
   return <li className="dt-row">
     <Dot state={dot} label={state} />
@@ -143,7 +143,8 @@ export function SourceStatus() {
   const { setup } = usePanelData()
   const { data, error } = usePoll(() => call('GET sources'), [])
   // Global deployment setup problems halt all Sources and show at the top; Source-specific setup problems show on that Source's row.
-  const elsewhere = setup?.problem?.place === 'deployment' ? setup.problem : undefined
+  const core = coreSetupProblem(setup)
+  const elsewhere = core?.place === 'deployment' ? core : undefined
   return <div className="dt-form">
     <StatusHead hint={t('sourceStatusIntro')} settings="source" />
     {elsewhere && <p className="dt-error">

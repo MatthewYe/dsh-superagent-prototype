@@ -2,7 +2,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
-import type { Deployment } from '../deployment.ts'
+import type { Deployment, Machine, Probe } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
 
@@ -37,20 +37,38 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
   /** Receiving scopes of the Policy's admission table under `config` (matching `scope().row`); kinds without `rows` use the table's defaults. */
   rows?(config: Record<string, unknown>): AdmissionRowView[]
   /** Optional external roster sync (such as chat members); `ready` reports whether `part` names a target to refresh from. */
-  sync?: { label: Localized; ready(part: P): boolean; run(host: SourceHost, part: P, signal: AbortSignal): Promise<P> }
+  sync?: { label: Localized; ready(part: P): boolean; detail?(part: P): string;
+    run(host: SourceHost, part: P, signal: AbortSignal): Promise<P> }
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
-export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
+/** Deployment facts a channel link may read: the repository and each Source kind's resolved profile. */
+export type ChannelLinks = { repository?: string; sources: Readonly<Record<string, unknown>> }
+/** A Source kind's own deployment slot: the setup-read configuration fields and the probe that resolves its profile. */
+export interface SourceSetup {
+  /** Configuration fields whose values affect setup and restart dsh-superagent when they change. */
+  fields: readonly string[]
+  /** Resolves this kind's deployment profile, or undefined when the kind is unconfigured. Throws SetupError on failure. */
+  probe(input: { machine: Machine; config: Record<string, unknown>; run: Probe; signal: AbortSignal }): Promise<unknown>
+}
+/** Capabilities an outbound Channel gets from the registry: the bridge commands and an optional health report. */
+export type ChannelSendHost = Pick<SourceContext, 'commands'> & Partial<Pick<SourceContext, 'report'>>
+/** Classification a Channel attaches to a failed send; `permanent` means retrying the same message cannot succeed. */
+export class ChannelSendError extends Error {
+  override name = 'ChannelSendError'
+  constructor(message: string, readonly outcome: 'permanent' | 'retryable') { super(message) }
+}
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
   allowed?(address: Record<string, string>, config: C): boolean
   /**
    * Sends a message idempotently by ID; returns `'gone'` when the target conversation no longer accepts replies.
-   * @throws when delivery failed but may succeed on a later retry.
+   * @throws when delivery failed; a `ChannelSendError` with `outcome: 'permanent'` is not retried.
    */
-  send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  send(host: ChannelSendHost, message: OutboundMessage): Promise<'sent' | 'gone'>
+  /** Hard word limit for replies in this Channel; the Outbox rejects a longer reply with the standard message. */
+  words?: number
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }
@@ -94,6 +112,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   fields: FieldSpec[]
   /** Health entry names owned by this kind under `health[...]`; no other kind or core loop may report them. */
   health: string[]
+  /** Deployment slot this kind resolves and the fields setup watches; kinds without one contribute no profile or fields. */
+  setup?: SourceSetup
   /** Listening rule for a trigger (or recorded Mandate basis) of this kind; kinds without `scope` listen to everything they produce and observe none of it. */
   scope?(input: { meta: Record<string, unknown> }, config: C): ScopeResult
   /** Outbound reply adapter; kinds without `channel` produce no replies or channel checks. */

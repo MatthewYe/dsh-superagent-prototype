@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
-import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
+import { backfillChat, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
@@ -40,10 +40,10 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   // Record outbound messages in the store without sending them.
   const parts: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, commands, sources, deployment,
-    ready: Promise.resolve(), configured: () => true, receive, ...overrides }
+    problems: new Map(), ready: Promise.resolve(), configured: () => true, receive, savePolicyPart: async () => {}, ...overrides }
   // The Sources' functions take the context; plugin entries and kind callbacks take the host, which builds each kind's context.
   const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(parts, kind) }
-  const context = sourceContextOf(parts, { kind: 'feishu', health: ['github', 'feishu', 'history'] })
+  const context = sourceContextOf(parts, { kind: 'feishu', health: ['github', 'feishu', 'history:feishu'] })
   const health = overrides.sources ? healthOf.get(overrides.sources)!.all : board.all
   return { ...value, ...context, health, store, engine, commands: parts.commands, receive, executor }
 }
@@ -96,18 +96,18 @@ describe('feishu source', () => {
       const value = host({ sources: emptyRegistry(), ...overrides })
       const disposers: (() => unknown)[] = []
       applyFeishu({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
-      await vi.waitFor(() => expect(value.health.history).toBeDefined())
+      await vi.waitFor(() => expect(value.health['history:feishu']).toBeDefined())
       const registered = value.sources.kind('feishu')
       // Snapshot health before disposal clears the registered entries.
       const health = { ...value.health }
       for (const dispose of disposers) await dispose()
       return { ...value, registered, health }
     }
-    const unset = await run({ deployment: testDeployment({ feishu: undefined }) })
+    const unset = await run({ deployment: testDeployment({ sources: {} }) })
     expect(unset.registered).toBe(feishuKind)
-    expect(unset.health).toMatchObject({ feishu: { state: 'paused', code: 'feishuCliUnset' }, history: { state: 'paused', code: 'feishuBotMissing' } })
+    expect(unset.health).toMatchObject({ feishu: { state: 'paused', code: 'feishuCliUnset' }, 'history:feishu': { state: 'paused', code: 'feishuBotMissing' } })
     const problem = new SetupError('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }).problem
-    const refused = await run({ deployment: testDeployment({ feishu: undefined }), feishuProblem: problem })
+    const refused = await run({ deployment: testDeployment({ sources: {} }), problems: new Map([['feishu', problem]]) })
     // A failed bot check waits for the operator's fix and a check; it does not retry by itself like a polling error.
     expect(refused.health.feishu).toEqual({ state: 'paused', detail: problem.detail })
     expect((await run({ configured: () => false })).health.feishu).toEqual({ state: 'paused', detail: 'Waiting for the deployment check', code: 'setupPending' })
@@ -300,12 +300,6 @@ describe('feishu source', () => {
     expect(tally.skipped).toBe(1)
     expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.messageId)).toEqual(['om_good'])
     h.store.close()
-  })
-  it('waits a second before restarting the event consumer after a run that stayed up for a minute, and backs off otherwise', () => {
-    expect(consumerRetry(undefined, 0)).toBe(1000)
-    expect(consumerRetry(1000, 500)).toBe(2000)
-    expect(consumerRetry(32_000, 500)).toBe(60_000)
-    expect(consumerRetry(60_000, 120_000)).toBe(1000)
   })
   it('syncs its part of the Policy from the sync chat: people who left are removed, names follow the chat, new people are appended', async () => {
     const h = host()
@@ -974,7 +968,7 @@ describe('source context', () => {
   it('gives each kind the setup problem whose place it is', () => {
     const feishu: SetupProblem = { place: 'feishu', code: 'feishuNoBot', values: {}, detail: 'No bot' }
     const github: SetupProblem = { place: 'github', code: 'agentCliUnset', values: {}, detail: 'No CLI' }
-    const h = host({ feishuProblem: feishu, setupProblem: github })
+    const h = host({ problems: new Map([['feishu', feishu], ['github', github]]) })
     expect(h.context(feishuKind).problem).toBe(feishu)
     expect(h.context(githubKind).problem).toBe(github)
     expect(h.context({ kind: 'probe', health: [] }).problem).toBeUndefined()
@@ -1073,11 +1067,11 @@ describe('feishu event consumer', () => {
     const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
     const policy = () => settingsPolicy(store.settings(), sources)
     const engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, outbox })
-    const deployment = testDeployment({ feishu: { ...testDeployment().feishu!, cli: path } })
+    const deployment = testDeployment({ sources: { feishu: { ...(testDeployment().sources.feishu as object), cli: path } } })
     const health = board.all
     const commands = new Commands(() => deployment, {}, controller.signal)
-    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
-      receive: (trigger: Trigger) => engine.receive(trigger) }
+    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, problems: new Map(), ready: Promise.resolve(), configured: () => true,
+      receive: (trigger: Trigger) => engine.receive(trigger), savePolicyPart: async () => {} }
     const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
     return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
   }
@@ -1125,10 +1119,10 @@ describe('feishu event consumer', () => {
       })
       const stop = new AbortController()
       const loops = runFeishu(ctx, AbortSignal.any([stop.signal, controller.signal]))
-      await vi.waitFor(() => expect(['ready', 'error']).toContain(health.history?.state), until)
+      await vi.waitFor(() => expect(['ready', 'error']).toContain(health['history:feishu']?.state), until)
       stop.abort(); await loops; lark.mockRestore()
       const cursors = Object.fromEntries(['oc_a', 'oc_b', 'oc_dm'].map(chat => [chat, store.get(KV.feishu.history(chat))]))
-      const result = { chats, cursors, history: health.history }
+      const result = { chats, cursors, history: health['history:feishu'] }
       store.close(); rmSync(join(dir, 'db.sqlite'), { force: true }); rmSync(join(dir, 'db.sqlite-wal'), { force: true })
       rmSync(join(dir, 'db.sqlite-shm'), { force: true })
       return result

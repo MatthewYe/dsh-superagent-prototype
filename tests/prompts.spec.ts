@@ -95,7 +95,7 @@ it('rejects unknown keys, built-in skill names and oversized configuration befor
     const prompts = promptsOf(store)
     expect(() => prompts.save({ ...defaultPrompts(), shared: 'x' }, 0, 'panel')).toThrow()
     expect(() => prompts.save({ communication: '', scope: '' }, 0, 'panel')).toThrow()
-    for (const name of ['github', 'feishu']) expect(() => prompts.save({ ...defaultPrompts(), skills: { [name]: 'mine' } }, 0, 'panel')).toThrow('built-in skill')
+    for (const name of ['github', 'feishu', 'slack']) expect(() => prompts.save({ ...defaultPrompts(), skills: { [name]: 'mine' } }, 0, 'panel')).toThrow('built-in skill')
     expect(() => prompts.save({ ...defaultPrompts(), skills: { 'Bad Name': 'x' } }, 0, 'panel')).toThrow()
     expect(() => promptsOf(store, 1000).save(defaultPrompts(), 0, 'panel')).toThrow('exceeds')
     expect(prompts.current().revision).toBe(0)
@@ -112,7 +112,7 @@ it('lists a ticket\'s execution environment in its prompt, and says setup is inc
   })
 })
 
-it('registers the built-in Source skills, Feishu only with a Feishu bot, before the team skills', () => {
+it('registers the built-in Source skills, Feishu and Slack only with their Source, before the team skills', () => {
   withStore(store => {
     const config = { ...defaultPrompts(), skills: { release: 'Tag releases.' } }
     const skills = promptsOf(store).skills(config)
@@ -120,6 +120,11 @@ it('registers the built-in Source skills, Feishu only with a Feishu bot, before 
     expect(skills[1]![1]).toContain('## CLI usage')
     expect(skills[2]![1]).toBe('Tag releases.')
     expect(new Prompts(store, () => 100000, variables, () => false).skills(config).map(([name]) => name)).toEqual(['github', 'release'])
+    const withSlack = new Prompts(store, () => 100000, variables, () => true, () => true).skills(config)
+    expect(withSlack.map(([name]) => name)).toEqual(['feishu', 'github', 'slack', 'release'])
+    expect(withSlack[2]![1]).toContain('slack-bridge')
+    expect(withSlack[2]![1]).toContain('## CLI usage')
+    expect(withSlack[3]![1]).toBe('Tag releases.')
   })
 })
 

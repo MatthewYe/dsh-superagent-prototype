@@ -8,10 +8,10 @@ export function wordCount(text: string): number {
   for (const segment of words.segment(text)) if (segment.isWordLike) count++
   return count
 }
-/** Validates that an outgoing IM Markdown message does not exceed `IM_WORDS` (link labels and URLs both count toward the limit). */
-export function checkedImText(text: string): string {
+/** Validates that an outgoing IM Markdown message does not exceed `limit` (link labels and URLs both count toward the limit). */
+export function checkedImText(text: string, limit = IM_WORDS): string {
   const count = wordCount(text)
-  if (count > IM_WORDS) throw new Error(`IM message has ${count} words; maximum is ${IM_WORDS}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
+  if (count > limit) throw new Error(`IM message has ${count} words; maximum is ${limit}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
   return text
 }
 export const fill = (template: string, values: Record<string, string>): string => template.replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? '')

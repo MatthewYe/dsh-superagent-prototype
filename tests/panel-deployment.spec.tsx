@@ -83,7 +83,7 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   server.form = fakeForm().form
   await render('page')
   for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
-  server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: { deployment: problemOf('repositoryUnset') }, accounts: null }
   await render('page')
   expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars).disabled).toBe(false)
@@ -112,7 +112,7 @@ it('tells a dsh-superagent that is starting from a browser that cannot write on 
 it('reads the state every second after a setup check, until dsh-superagent stopped answering and answers again', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   onTestFinished(() => { vi.useRealTimers() })
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: { deployment: problemOf('agentCliUnset') }, accounts: null }
   at({ page: 'settings', query: { group: 'deployment' } })
   await mount()
   await click(zh.setupCheck)
@@ -121,7 +121,7 @@ it('reads the state every second after a setup check, until dsh-superagent stopp
   await second()
   expect(text()).toContain(zh['setup.agentCliUnset'])
   server.down = false
-  server.setup = { ...server.setup, problem: null }
+  server.setup = { ...server.setup, problems: {} }
   await second()
   expect(text()).not.toContain(zh['setup.agentCliUnset'])
   // Once it answers, the state is read every five seconds again.
@@ -133,7 +133,7 @@ it('reads the state every second after a setup check, until dsh-superagent stopp
 it('ends a restart that never stopped answering after half a minute, and reads the state every five seconds again', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   onTestFinished(() => { vi.useRealTimers() })
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: { deployment: problemOf('agentCliUnset') }, accounts: null }
   at({ page: 'settings', query: { group: 'deployment' } })
   await mount()
   await click(zh.setupCheck)
