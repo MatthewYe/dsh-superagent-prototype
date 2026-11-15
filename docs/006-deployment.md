@@ -1,54 +1,446 @@
 # 006 Deployment
 
-Use this guide to build, run, configure, upgrade and troubleshoot dsh-superagent. Docker is the primary deployment: one image, one container per instance. `scripts/dsh-superagent` is the operator entry point: it drives Compose for the `superagent` and `livis` instances, keeps the four status exit codes, and delegates to the preserved host supervisor only when asked with `--legacy`. The host-profile installation is in the [appendix](#appendix-host-profile-installation) for development and the rollback window; `SETUP.md` follows that path.
+dsh-superagent runs as native macOS processes under tmux. That is the primary deployment: one `dsh --profile <instance>` process per instance, supervised by `scripts/dsh-superagent`. The Docker/Compose path is frozen and exists only as an experimental opt-in and the rollback window; it is documented in the [appendix](#appendix-docker-path-frozen-experimental). `docs/adr/0004-host-native-deployment.md` records why the deployment moved out of containers, and `docs/adr/0002-docker-deployment.md` is superseded.
 
-The chapter builds on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md). The root `GLOSSARY.md` fixes the deployment vocabulary, and `docs/adr/0002-docker-deployment.md` records why the stack is shaped this way.
+The deployment exists because the work needs macOS, not because the harness needs a container. Xcode and the iOS Simulator, the Keychain-backed GitHub CLI, Homebrew tools and the Slack Socket Mode connection are host capabilities. A Linux container cannot run them, and a macOS VM degrades the Simulator and cannot nest Docker. The host-native path keeps those tools in the same process tree the workers use.
+
+This chapter builds on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md). The root `GLOSSARY.md` fixes the deployment vocabulary. `SETUP.md` walks an operator and an agent through the host-native path.
 
 ## Instances and profiles
 
-An instance is one running copy of the product. It has its own DeepSeek Harness profile, state directory, panel port and container. The two instances share the image and the product code; they share no state.
+An instance is one running copy of the product. It has its own DeepSeek Harness profile, absolute state directory, loopback panel port and tmux session. The two instances share the product code and the installed dependencies; they share no state.
 
-| Instance | Profile | Host panel | State | Status |
-| --- | --- | --- | --- | --- |
-| `superagent` | `superagent` | `127.0.0.1:3082` | volume `superagent-state` | implemented |
-| `livis` | `livis` | `127.0.0.1:3083` | volume `livis-state` | implemented (#4) |
+| Instance | Profile | Host panel | State | tmux session | Status |
+| --- | --- | --- | --- | --- | --- |
+| `superagent` | `superagent` | `127.0.0.1:3082` | `~/.dsh/state/superagent` | `dsh-superagent` | implemented and live |
+| `livis` | `livis` | `127.0.0.1:3083` | `~/.dsh/state/livis` | `dsh-livis` | implemented and live |
 
-One container runs per state directory, because the orchestrator takes an exclusive lock on it, the SQLite database has one writer, and the panel token rotates per boot. Do not scale a service or share a state volume between containers.
+One process runs per state directory. The orchestrator takes an exclusive lock on `<stateDir>`, the SQLite database has one writer, and the panel token rotates per boot. Starting a second process against the same `stateDir` fails its lock check; do not copy a running state directory, and do not point two instances at one directory.
 
-One image carries both profile templates: `superagent` links the product and listens on the container-internal `3082`; `livis` additionally installs the Livis source plugin built from the sibling `dsh-livis` checkout and listens on `3083`. The two services share the image tag, the relay and the healthcheck, and differ only in profile, state volume, published port and the plugin's state directory. The `livis` relay identity (the `hermes-…` agent reconnect with the live refresh token) is exercised only at cutover (#7); the opt-in test uses a sanitised copy with a rejected token, as described under [Volumes and state](#volumes-and-state).
+Each instance has a dedicated DSH profile so the plugin's process-wide `PATH` and git changes do not leak into the profile the operator works in, and so the two instances can be restarted and upgraded independently. The `livis` profile additionally loads the Livis source plugin from the sibling `dsh-livis` checkout and listens on `3083`. It keeps its client state and job journal under `~/.dsh/state/livis/livis-source`; only one process may hold the Livis refresh token, which rotates on every successful refresh.
 
 ### What exists today
 
-The Docker path carries the container skeleton from the deployment ticket, the credential and state-import path from #3, and the second `livis` instance with its plugin from #4. It is enough to build one image, start either instance from its own volumes, import the host's state once and use the panel and management API.
+The host-native path is the live deployment. Both instances run as native processes, the state directories, Tickets and Sessions are intact, Slack is connected and the GitHub Source polls normally.
 
-| Capability | Today | Follow-up |
-| --- | --- | --- |
-| Image, container, relay, healthcheck, panel | implemented and covered by the opt-in test | — |
-| Real agent GitHub credential | implemented by `scripts/docker-instance`: the token is resolved and validated, then materialised as a 0600 file, mounted read-only, removed by `stop` | — |
-| Model key and DSH credential | implemented by the start path: key from the environment or `op run`, DSH credential copied into the home volume | — |
-| One-time import of host state | implemented after a SQLite WAL checkpoint, with an idempotent marker and an unchanged host copy | — |
-| `livis` service, profile and plugin | implemented: the image binds the Livis source plugin from `LIVIS_DIR`, the `livis` service has its own home/state volumes and the published port `3083`; the wrapper can prepare, start, stop and report it | relay identity at cutover (#7) |
-| `scripts/dsh-superagent` driving Compose | implemented: `start`, `stop`, `restart`, `status`, `logs` and `build` for both instances; the four readiness exit codes, `--respect-stop`, the panel URL under `.artifacts/instances/<instance>/panel-url`, and an image built on demand | — |
-| Hourly recovery of a Docker instance | implemented: the existing hourly check calls `scripts/dsh-superagent --respect-stop restart`; Compose's `restart: unless-stopped` covers a crashed container | — |
-| Cutover runbook | not written | #7 |
+| Capability | Today |
+| --- | --- |
+| Host-native supervisor `scripts/dsh-superagent` | implemented: `start`, `stop`, `restart` and `status` for both instances, tmux sessions, flock, four readiness exit codes, logs under `.artifacts/` |
+| Readiness and status | implemented: one JSON object with pids, cwd, URL, manual-stop marker, health, part errors, setup and Feishu state |
+| File-based credentials | implemented: the DSH credential store, the agent's Keychain-backed `gh` configuration, the Slack tokens and the model key, all outside the repository |
+| Panel access | implemented: loopback URL and a per-boot token scraped from the `dsh web:` log line |
+| Hourly recovery | implemented: the hourly check runs `--respect-stop restart` and reports setup and non-runtime errors without restarting |
+| `livis` profile and plugin | implemented: its own state directory, loopback port and Livis source plugin |
+| Docker rollback assets | retained: `Dockerfile`, `compose.yaml`, `scripts/docker-build`, `scripts/docker-instance`, `scripts/docker/` and the frozen wrapper `scripts/dsh-superagent-docker` |
+| Live cutover | complete for both instances; see `docs/adr/0004-host-native-deployment.md` |
 
-The opt-in tests prove the implemented column: build, boot, unconfigured readiness, panel login, management API, health transitions, restart persistence on one image, the shim and credential plumbing, one-time import with an unchanged host copy, and teardown. The credential test makes a real model call and checks usage only when the model key resolves; otherwise that assertion is skipped and reported. The live GitHub check runs only after the start path has validated the token; if GitHub later rejects it, the test reports that and the shipped stand-in still proves the shim and the git credential path. The livis test copies the host state, replaces the refresh token with a value the identity service rejects, pauses the copied settings and disables every Source, then asserts the real plugin claims its `livis` health entry, reports a graceful authentication failure, keeps DSH serving, and preserves the imported state and the one-container-per-volume rule.
+## Host-native path
 
-## Docker path
+### What runs
+
+- **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. It loads the bundle and serves its panel on `127.0.0.1:3082`. Keep it separate from the profile you work in. A second profile, `livis`, loads the Livis plugin and listens on `3083`.
+- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
+- **Optional:** a Feishu bot or a Slack app for chat requests.
+- **One supervisor process per instance.** `scripts/dsh-superagent` runs `dsh --profile <instance> --no-open` inside a tmux session, records the pane pid, and owns the stop marker, operation lock and logs. The script itself exits after `start`; the tmux pane keeps the service alive.
+
+Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+
+### Permissions and isolation
+
+The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-router` for the main Session. They appear in the DeepSeek Harness preset list but are intended only for dsh-superagent. Do not select them for personal Sessions or disable their configuration rows. The application needs them to create and resume its Sessions.
+
+Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
+
+Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. There is no container boundary: a worker can execute programs by path, read the operator's home directory and write any checkout the operator can write, including `~/.dsh` and its credential store. Account wrappers choose the agent's credentials by default; they do not isolate the process. For isolation, use a dedicated macOS account that contains only the agent's credentials and the checkout, and run the instance there. Do not run untrusted requests on an operator account whose home contains unrelated secrets.
+
+One process per `stateDir` is also a safety rule, not only a lock: a second process would race the SQLite writer and the rotating Livis token.
 
 ### Prerequisites
+
+- macOS 26.7 arm64 (tested). Native deployment assumes the operator's macOS user, its Keychain and its Homebrew installation.
+- Xcode 27.2 with the iOS Simulator installed, when Tickets build or run an app in the Simulator. Check with `xcodebuild -version` and `xcrun simctl list devices`. The Simulator is a host GUI service and is not available to a Linux container.
+- Homebrew (`brew`) for the host tools. Install or verify `git` 2.32 or later, `git-lfs`, `gh` 2.104 (tested; the Source CLI contract needs 2.48 or later), `python3` 3.8 or later, `tmux` and `jq`.
+- Node.js 22.19+ or 24+, and pnpm.
+- DeepSeek Harness CLI `0.2.1-rc.3`, or another version within the bundle's `engines.dsh` range.
+- Keychain access for the agent's `gh` account. The host-native path resolves the token through the Keychain-backed `~/.config/gh-agent` configuration; it does not copy a token into a container.
+- Slack access, if used: an internal app with Socket Mode and its two tokens. Socket Mode is an outbound WebSocket; no inbound port is needed.
+- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- A model channel configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
+- For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot.
+
+### Accounts
+
+#### Agent GitHub account
+
+1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
+2. Give it a GitHub CLI that uses only its own credentials:
+
+   ```sh
+   mkdir -p ~/.local/bin
+   cat > ~/.local/bin/gh-agent <<'EOF'
+   #!/bin/sh
+   GH_CONFIG_DIR="$HOME/.config/gh-agent" exec gh "$@"
+   EOF
+   chmod +x ~/.local/bin/gh-agent
+   gh-agent auth login
+   gh-agent api user --jq .login
+   ```
+
+   Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way. On macOS `gh` stores the token in the login Keychain and keeps `~/.config/gh-agent/hosts.yml` as its configuration; keep that file at mode `0600` and do not put the token in a repository or shell profile.
+
+#### Feishu bot (optional)
+
+1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.
+2. Give the bot its own `lark-cli` configuration, restricted to the bot identity, and a wrapper:
+
+   ```sh
+   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config init --app-id <cli_…> --app-secret-stdin
+   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config strict-mode bot --global
+   cat > ~/.local/bin/lark-bot <<'EOF'
+   #!/bin/sh
+   export LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent"
+   exec lark-cli "$@"
+   EOF
+   chmod +x ~/.local/bin/lark-bot
+   ```
+
+   The first command reads the app secret from standard input. Use a separate configuration directory: `lark-cli` allows one profile per app id, and your personal configuration may already contain a user login for that app.
+
+   The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
+
+   Both configurations share the Keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+#### Slack app (optional)
+
+1. Open `https://api.slack.com/apps`, choose **Create New App → From an app manifest**, and pick the one workspace this installation serves. Paste a manifest with Socket Mode on, token rotation off, interactivity off, and these bot scopes: `app_mentions:read`, `channels:history`, `channels:read`, `channels:join`, `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `chat:write`, `files:read` and `users:read`. Subscribe the bot to `app_mention`, `message.channels`, `message.groups`, `message.im`, `app_uninstalled` and `tokens_revoked`.
+2. Choose **Install to Workspace** and approve, then copy the **Bot User OAuth Token** (`xoxb-…`). Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope and copy it (`xapp-…`).
+3. Build the bridge and store the tokens on the host:
+
+   ```sh
+   pnpm build
+   slack-bridge auth <<'EOF'
+   {"bot_token":"xoxb-…","app_token":"xapp-…"}
+   EOF
+   slack-bridge api auth.test
+   ```
+
+   `auth` writes `~/.slack-dsh-superagent/config.json` with mode `0600`; the second command prints the workspace and bot the setup probe also reads. The bridge also reads `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the process environment and those take precedence over the file, but the deployment does not set them.
+
+4. Point the Slack Source's `cli` at the bridge's absolute path, usually `<checkout>/lib/slack-bridge.js`, or at the command `pnpm link --global` puts on `PATH`.
+
+The installation belongs to the account that installed the app. If that account leaves the workspace, Slack revokes the token and the Source reports it until the app is reinstalled and the tokens are stored again. Keep the app internal: a Socket Mode app cannot be distributed through the Slack Marketplace.
+
+### Install
+
+Run this block once, on a machine that has no `superagent` profile yet:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+git clone <this repository> dsh-superagent && cd dsh-superagent
+pnpm install && pnpm build
+dsh superagent --from-default-profile web --dump-config > /dev/null
+dsh plugin --profile superagent add "link:$PWD"
+```
+
+The pinned version above is public; other versions must satisfy `engines.dsh` in `package.json`. `pnpm build` produces `lib/`, including the Slack bridge. `scripts/dsh-superagent` requires `dsh` and `tmux` on `PATH`; it refuses to start otherwise.
+
+The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
+
+Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its `cordis.patch.yml`, including machine configuration. Do not use it for upgrades. The `livis` instance uses its own dedicated profile in the same way, with the Livis source plugin installed from the sibling `dsh-livis` checkout.
+
+### Profile and credentials
+
+The profile holds the absolute `stateDir` and machine limits. The state directory is created on first start; its default is `~/.dsh/state/<profile>`. Credentials never live in this repository and never in `.artifacts/` under the checkout. The deployment reads them from fixed 0600 locations:
+
+| Credential | Location | Mode | Used by |
+| --- | --- | --- | --- |
+| DSH credential store | `~/.dsh/.credentials.yaml` | 0600 | provider account records, including the `livis` `deepseek-account` model |
+| Agent GitHub CLI | `~/.config/gh-agent/hosts.yml` and the macOS Keychain | 0600 | the `gh-agent` wrapper; `gh auth token` reads the Keychain entry |
+| Slack app tokens | `~/.slack-dsh-superagent/config.json` | 0600 | `slack-bridge`; written by `slack-bridge auth` |
+| Model key | `~/.dsh/.env` (mode 0600), `op run`, or the process environment | 0600 | `DEEPSEEK_API_KEY` for the `superagent` profile; `livis` may read the DSH credential store instead |
+
+The model key can come from `DEEPSEEK_API_KEY`, from `~/.dsh/.env`, or from the 1Password references in `~/.config/op/llm.env` through `op run --env-file`. Exporting the key in the supervisor's environment works but is the least durable option. If the key is missing, setup reports the model problem; do not write the key into `cordis.patch.yml`, a Ticket, or a prompt.
+
+The agent's `gh` token is file-backed on disk but protected by the macOS Keychain. `gh-agent api user` is the check: if it fails, re-run `gh-agent auth login` rather than copying a token by hand. `~/.config/gh-agent/hosts.yml` must not be group- or world-readable.
+
+`~/.dsh/.env` is loaded by the instance at start; keep it at mode `0600`. It may hold `DEEPSEEK_API_KEY` and nothing else. Secrets in `~/.dsh/sessions`, `~/.dsh/profiles` and `~/.dsh/state` are live operator data: back them up but never commit them.
+
+### Machine configuration
+
+Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there; for Slack, the `dsh-superagent-slack` entry. The `webserver` entry sets the panel's port.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades. Use `~/.dsh/state/superagent` or `~/.dsh/state/livis` expanded to an absolute path, not a tilde or a relative path |
+| `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
+
+After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+### Start, stop and status
+
+```sh
+scripts/dsh-superagent start
+scripts/dsh-superagent status
+scripts/dsh-superagent restart
+scripts/dsh-superagent stop
+
+scripts/dsh-superagent --profile livis --url http://127.0.0.1:3083 start
+scripts/dsh-superagent --profile livis --url http://127.0.0.1:3083 status
+scripts/dsh-superagent --profile livis --url http://127.0.0.1:3083 stop
+```
+
+`start` runs `dsh --profile <profile> --no-open` in tmux session `dsh-<profile>`, or opens a new window in that session when it already exists. It waits up to one minute for the runtime to become ready or report a setup requirement, and prints the missing setup information on a first run. It refuses duplicate instances, including ones started outside this script, and refuses a URL where another orchestrator already answers. `--profile` defaults to `DSH_SUPERAGENT_PROFILE` or `superagent`; `--url` defaults to `DSH_SUPERAGENT_URL` or `http://127.0.0.1:3082`.
+
+`stop` and `restart` send SIGINT and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions. A stop that times out keeps the manually-stopped marker, so the hourly check does not immediately undo it.
+
+`status` prints one JSON object with `pids`, `cwd`, `url`, `manually_stopped`, `health`, `errors`, `setup` and `feishu`. `pids` is empty when the instance is stopped. `status`, `start` and `restart` exit with one of four codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The service runs normally |
+| 1 | It does not run, runs twice, does not answer, or its runtime reports an error; a restart may fix it |
+| 2 | It runs, but a part other than the runtime, such as a Source or a Policy sync (`sync:<source id>`), reports an error; a restart does not fix it |
+| 3 | It runs and waits for setup; a restart does not fix it |
+
+A Source that is still starting counts as normal operation. So does a Feishu bot that setup could not check.
+
+`status` returns failed parts and their details under `errors`, and setup requirements under `setup`. `start` and `restart` print those problems as lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
+
+Each profile stores logs and control files under `.artifacts/`:
+
+- Startup logs: `.artifacts/dsh-superagent-<profile>-<date>-<time>-<pid>.log`. The newest 20 are kept. The log contains the `dsh web:` line with the panel URL.
+- Control files: `.artifacts/control/profiles/<profile>/`, containing the stop marker, the operation lock and the recorded process id.
+
+To watch the service, `tmux attach -t dsh-superagent` (or `dsh-livis`); detach with Ctrl-b then d. The process stays in its tmux pane.
+
+#### Panel URL and token
+
+Open the URL from the newest log line. The token changes on every boot, so re-read it after a restart:
+
+```sh
+grep -o 'http://127.0.0.1:3082/?token=[A-Za-z0-9_-]*' \
+  "$(ls -t .artifacts/dsh-superagent-superagent-*.log | head -n 1)" | tail -n 1
+```
+
+For `livis`, replace `3082` with `3083` and `superagent` with `livis`. Open the URL and choose **Superagent** (or **Livis**) in the sidebar. A 401 from the panel means the token rotated: re-read the log rather than reusing the old URL.
+
+### Hourly check
+
+Create the hourly check in the DeepSeek Harness profile you normally use, not in the instance's profile. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
+
+```text
+Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest `.artifacts/dsh-superagent-superagent-*.log`, read the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+```
+
+Use `--profile livis --url http://127.0.0.1:3083` for the second instance. `--respect-stop` preserves an intentional stop: only `stop` writes the marker, `start` clears it, and the check never wakes an instance the operator stopped. There is no Compose restart policy on this path; the hourly check is the recovery layer, and tmux keeps the pane alive when the supervisor script exits.
+
+The deployment does not install a launchd job. tmux survives the operator's terminal session, but not a reboot; after a reboot, run `start` for each instance. If a boot-time start becomes necessary, add a launchd job that runs `scripts/dsh-superagent start --respect-stop` and document it then; do not use launchd to replace the on-demand supervisor now.
+
+### Upgrade
+
+1. Wait until no Executor is in the middle of a turn, or pause processing with `POST executor/pause`.
+2. Back up the state directory, including `<stateDir>/orchestrator.sqlite`. The database migration is one-way: an older build cannot open a database migrated by a newer one.
+3. Update the checkout and rebuild the artifacts the running processes load:
+
+   ```sh
+   git pull
+   pnpm install
+   pnpm build
+   ```
+
+   `pnpm build` rewrites `lib/`; do this only after stopping or immediately before restarting both instances, because a running process that loads a partially written `lib/` can fail.
+4. Restart the instances:
+
+   ```sh
+   scripts/dsh-superagent restart
+   scripts/dsh-superagent --profile livis --url http://127.0.0.1:3083 restart
+   ```
+
+5. Inspect `scripts/dsh-superagent status`, the newest log and the panel. A running process is not the same as a healthy instance; wait until every health entry is `ready`.
+
+A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
+
+The previous checkout is not a working rollback by itself, because the database migration is one-way. Roll back with the pre-upgrade state backup and the previous commit: check out the previous commit, run `pnpm install && pnpm build`, restore the backup, then start. Keeping the pre-upgrade backup is mandatory.
+
+### Rollback to containers
+
+The Docker assets are retained for a seven-day rollback window after the cutover. The stopped containers and their named volumes still exist; do not delete them until the window closes and a host-native backup has been verified.
+
+1. Stop the host-native instance for that profile: `scripts/dsh-superagent --profile <instance> stop`. Never run the container and the host process against the same state or the same Livis refresh token.
+2. Export the retained image tag and start the frozen wrapper: `export SUPERAGENT_IMAGE=<tag>; scripts/dsh-superagent-docker --profile <instance> start`.
+3. Remember that the container volumes hold the state imported at cutover, not anything written by the host-native process since. If current state is required, take an offline backup of the host state directory and import it with the appendix's procedure; do not copy a live SQLite database.
+4. The appendix documents the container commands, volumes and health behavior. The Docker path is frozen: it receives no new features and no new deployments.
+5. After seven days, remove the containers and volumes only after verifying the host-native backup. Deleting them ends the rollback option.
+
+## Configure an instance
+
+Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
+
+1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. This is the agent wrapper, for example `$HOME/.local/bin/gh-agent`; the prepare command and the worker run as the same operator user. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages. For Slack, set the bridge path, each conversation's mentions-only or all-messages mode, the other-conversation choice, the direct-message switch, and, under Advanced, the history page size and backfill days.
+2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**; with Slack, a conversation, with the workspace id and listed bots.
+3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
+
+   ```sh
+   git -C /home/me/src/widgets fetch --no-tags "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET" &&
+   git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
+   ```
+
+   List personal CLIs, such as one signed in to your own account, as blocked commands. Keep the clone and its worktrees writable by the operator, because the prepare command and the worker run as that user on the host.
+4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+
+### Management API
+
+The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
+
+From the host, send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`; the default port is `3082`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+
+API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
+
+Agents may rely on these routes and fields. The other routes in `src/app/api.ts` serve the panel and change with it.
+
+| Request | Answer |
+| --- | --- |
+| `GET state` | What every page reads: `setup`, with `problems`, a map from a settings card or Source kind such as `feishu` or `slack` to its setup problem, each with `place`, `code`, `values` and `detail`, `problem`, the first blocking problem (`null` when ready), `feishuProblem`, the Feishu Source's problem when present, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
+| `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
+| `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
+| `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
+| `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
+| `POST setup/check` | Runs setup again by restarting dsh-superagent: `restarting: true`. Refused when setup has nothing to fix |
+| `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
+| `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
+| `POST tickets/<id>/retry`, `POST tickets/<id>/stop` | Retries or stops a Ticket, as the panel does |
+
+Health entries are grouped by responsibility:
+
+| Entry | Reports |
+| --- | --- |
+| `runtime` | The application itself |
+| `models` | Sessions waiting on a model-budget retry |
+| `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
+| `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
+| `worker` | Executor Session event handling; appears after its first failure |
+| `github`, `feishu`, `slack`, `history:feishu`, `history:slack` | Source polling, events and history recovery |
+| `sync:<source id>` | Allowed-list synchronization |
+
+A refusal has a status and `error`, its English text:
+
+- 400: an invalid value (`issues`, each with its `path`), a failed account check (`setup`), a fixed refusal (`code` and `values`), or a body that is not JSON or is too large.
+- 404: something that does not exist.
+- 409: a stale revision.
+- 500: anything else.
+
+The blocks:
+
+- `source:github`, `source:feishu`, `source:slack`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`; Slack's has `cli`, `chats` as `[{"conversationId": "C…", "name": "…", "listen": "mentions"}]` (or `"all"`), `otherChats`, `directMessages`, `readPageSize` and `backfillDays`.
+- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}, "slack": {"teamId": "T…", "allowed": [{"id": "U…", "name": "…"}], "syncConversation": "C…", "bots": []}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `eval`: `mode`, `timeoutSeconds` and `model`.
+- `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+
+Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
+
+```sh
+api=http://127.0.0.1:3082/orchestrator/api
+rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
+  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
+```
+
+The CLI value is the Agent CLI path on the host, usually `$HOME/.local/bin/gh-agent`.
+
+## Setup checks
+
+Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
+
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. It probes each enabled Source's account fields: Feishu's bot identity and Slack's bridge path, workspace and bot. A Feishu or Slack setup failure disables only that Source.
+
+The process environment that setup writes:
+
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the Feishu bot's CLI; `slack-bridge` runs the Slack bridge, or fails with `slack-bridge is unavailable: this installation has no Slack app.`; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
+
+A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
+
+## Agent presets
+
+The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
+
+## Troubleshooting
+
+Start with `scripts/dsh-superagent status` and the newest `.artifacts/dsh-superagent-<profile>-*.log`. The exit code names the class of problem; the JSON fields and the log name the part.
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part with its detail; each part clears its own entry once it works again |
+| `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
+| `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; `pids`, the output and the newest log say which |
+| `status` exits 1 with `An existing orchestrator answers at this URL` | Another instance is already listening on the port: use the other `--url`, or stop the duplicate. Do not point two profiles at one server |
+| `start` exits 1 with `Multiple dsh-superagent processes found` | More than one process matches the profile's command line. Stop the stale one with `scripts/dsh-superagent stop` after checking `status`; do not kill an unrelated process by pid |
+| `start` exits 1 with `Startup health check timed out` | The process was left running for inspection. Read the newest log for the startup failure, fix setup or the model key, then `restart` |
+| `stop` exits 1 with `Graceful stop timed out` | An Executor is still working. The stop marker is kept, so recovery will not restart the instance accidentally. Inspect the log and re-run `stop` when the turn ends; do not SIGKILL the pane |
+| `Another dsh-superagent control operation is in progress` | Another `start`, `stop` or `restart` holds the profile lock. Wait for it to finish; the lock lives under `.artifacts/control/profiles/<profile>/` |
+| `start` exits 1 with `proper-lockfile` or a state lock error | Another process is using the same `stateDir`. Run one process per state directory; check `ps` and `status` for a stale process before removing a lock |
+| The service exits while `dsh` is not found | `dsh` is not on the tmux pane's `PATH`. Install the pinned CLI and start from a shell that can run `dsh --version`; the supervisor checks `dsh` and `tmux` before starting |
+| The panel returns 401 | The token rotates per boot. Re-read the newest `dsh web:` line and open the new URL |
+| The panel does not load after an upgrade | A process still serves the old `lib/`. Run `scripts/dsh-superagent restart` after `pnpm build` |
+| `The agent GitHub CLI cannot read its account` | The Keychain entry or `~/.config/gh-agent` is missing. Run `gh-agent auth login` and `gh-agent api user` |
+| Setup reports the model key is missing | Set `DEEPSEEK_API_KEY` in `~/.dsh/.env` (0600) or export it through `op run`; restart the instance |
+| `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| `The Slack bridge does not work.` | Point the Slack Source at the absolute path of `lib/slack-bridge.js` (or a command on `PATH`), and run `slack-bridge api auth.test` by hand |
+| `Slack rejected the bridge token: …` | Reinstall the app if needed, store fresh tokens with `slack-bridge auth`, then restart |
+| Slack health says the bot token was revoked or the app was uninstalled | Reinstall the app to the workspace, store the new tokens with `slack-bridge auth`, and restart |
+| Slack health says the bot is not a member of a configured conversation | Invite the bot to that conversation, or remove the conversation from the Source card |
+| `Nothing happens after a mention` | Check that the author is allowed, the Source is on and processing is not paused. On GitHub, an edited Issue body does not trigger a mention; post a comment. On Slack, check the conversation and the Socket Mode connection |
+
+The shared setup and runtime rows apply to the host-native path and, where relevant, to the frozen Docker path.
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `The agent GitHub CLI is not set.` | Set the agent's CLI on the GitHub card |
+| `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
+| `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
+| `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
+| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
+| A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
+| `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
+| A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |
+| `… was not written by dsh-superagent` | Move the named file out of `<stateDir>/worker-bin` or `<stateDir>/worker-gitconfig`, or choose another `stateDir` |
+| `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as under Accounts |
+| `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
+| `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| `The Slack bridge does not work.` | Point the Slack Source at the absolute path of `lib/slack-bridge.js` (or a command on `PATH`), and run `slack-bridge api auth.test` by hand |
+| `Slack rejected the bridge token: …` | Reinstall the app if needed, store fresh tokens with `slack-bridge auth`, then retry |
+| `The Slack bridge returned an answer dsh-superagent could not read.` | Run `slack-bridge api auth.test` by hand and fix what it prints |
+| Slack health says the bot token was revoked or the app was uninstalled | Reinstall the app to the workspace, store the new tokens with `slack-bridge auth`, and restart |
+| Slack health says the bot is not a member of a configured conversation | Invite the bot to that conversation, or remove the conversation from the Source card |
+| `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
+| `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
+| The log says the plugin is incompatible with the running dsh | Use a DeepSeek Harness version within the `engines.dsh` range |
+| The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
+| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment. On Slack, check that the conversation is configured, the bot was invited, and the app's Socket Mode connection is healthy |
+
+## Try it
+
+From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat. For Slack, mention the bot in a configured conversation or send it a direct message.
+
+## Appendix: Docker path (frozen, experimental)
+
+> **Frozen.** `docs/adr/0002-docker-deployment.md` is superseded by `docs/adr/0004-host-native-deployment.md`. This appendix preserves the Docker implementation for the seven-day rollback window and for inspection. It is not a supported deployment and receives no new features.
+
+The operator entry for this path is `scripts/dsh-superagent-docker`. It drives `scripts/docker-instance` for Compose, credentials and the one-time state import. The live cutover is complete; references to cutover (#7) below are historical. Never start a container against a state directory or a Livis refresh token that a host-native process is using.
+
+### Docker prerequisites
 
 - Docker Engine with Compose v2. The path is exercised on macOS 26.7 arm64 with Docker 29.4 (OrbStack) and Compose v5.1.2; Linux and remote Docker hosts are not tested.
 - git 2.32 or later on the build host. `scripts/docker-build` reads the repository and dsh-livis commits for the image tag.
 - A checkout of this repository.
 - A checkout of [dsh-livis](https://github.com/MatthewYe/dsh-livis) for the Livis source plugin. `scripts/docker-build` defaults to `$HOME/Documents/WorkSpace/dsh-livis`, while the Compose `livis` build context defaults to `../dsh-livis`; set `LIVIS_DIR` to point at the checkout when it lives elsewhere. The checkout must be clean and have `pnpm-lock.yaml`, because the image tag names its commit.
 - Network access during the build: the product, the pinned DeepSeek Harness CLI and the plugin's workspace dependencies are installed from the registry.
-- A free loopback port, `3082` by default. A host-profile instance on `127.0.0.1:3082` conflicts; stop it or choose another published port.
+- A free loopback port, `3082` by default. A host-native instance on `127.0.0.1:3082` conflicts; stop it or choose another published port.
 - Enough free disk for the image and the build cache.
 
-Node.js, pnpm, DeepSeek Harness, tmux and Python are not host prerequisites for this path; the image contains them. The appendix lists the host requirements.
+Node.js, pnpm, DeepSeek Harness, tmux and Python are not host prerequisites for this path; the image contains them. The host-native path above lists the host requirements.
 
-### Build the image
+### Build the Docker image
 
 From the repository root:
 
@@ -73,7 +465,7 @@ Each commit is its first 12 characters. For example, a build at product commit `
 | `OPERATOR_HOME` | `$HOME` in the scripts; `/home/operator` in the Dockerfile and Compose | container-side home that owns the state path, the gh-agent shim and the baked profile `stateDir` |
 | `OPERATOR_UID` / `OPERATOR_GID` | `id -u` / `id -g` in the scripts; `1000` / `1000` in the Dockerfile and Compose | numeric identity the entrypoint chowns to and runs DSH as |
 
-#### Operator identity
+#### Docker operator identity
 
 The image is operator-bound. `OPERATOR_HOME` is the container-side home under which the state directory, the `gh-agent` shim and both baked profile `stateDir` values live; `OPERATOR_UID` and `OPERATOR_GID` are the numeric identity the entrypoint uses for file ownership and for the DSH process. The defaults are neutral (`/home/operator`, `1000`, `1000`), so a fresh clone contains no developer-specific path or uid. The scripts default them from the invoking operator: `OPERATOR_HOME=${OPERATOR_HOME:-$HOME}`, `OPERATOR_UID=${OPERATOR_UID:-$(id -u)}` and `OPERATOR_GID=${OPERATOR_GID:-$(id -g)}`, and export them to Compose.
 
@@ -89,22 +481,22 @@ Two operators with different homes or uids cannot share one image, because the b
 
 The script uses `docker buildx build --load --build-context livis="$LIVIS_DIR"`. The Dockerfile copies the two workspace packages (`dsh-livis-protocol` and `dsh-livis-source`) into `/opt/dsh-livis`, runs `pnpm install --frozen-lockfile` there with the image's pinned pnpm, and installs `dsh-livis-source` into the baked `livis` profile with `dsh plugin --profile livis add link:/opt/dsh-livis/packages/dsh-livis-source`. Only the plugin's runtime files enter the image; the checkout's `node_modules`, tests and scripts do not. The script refuses a missing, non-clean or lockfile-less checkout, because the tag must describe the plugin content. One image serves both services; there is no second build.
 
-### The operator wrapper
+### The Docker operator wrapper
 
-`scripts/dsh-superagent` is the supported entry point for both Docker instances. It selects one instance, drives `scripts/docker-instance` for the Compose, credential and import work, and reports readiness in the same four exit codes as the host path:
+`scripts/dsh-superagent-docker` is the frozen entry point for both Docker instances. It selects one instance, drives `scripts/docker-instance` for the Compose, credential and import work, and reports readiness in the same four exit codes as the host path:
 
 ```sh
-scripts/dsh-superagent start            # the superagent instance
-scripts/dsh-superagent status
-scripts/dsh-superagent logs --tail 200
-scripts/dsh-superagent stop
+scripts/dsh-superagent-docker start            # the superagent instance
+scripts/dsh-superagent-docker status
+scripts/dsh-superagent-docker logs --tail 200
+scripts/dsh-superagent-docker stop
 
-scripts/dsh-superagent --profile livis start
-scripts/dsh-superagent --profile livis status
-scripts/dsh-superagent --profile livis stop
+scripts/dsh-superagent-docker --profile livis start
+scripts/dsh-superagent-docker --profile livis status
+scripts/dsh-superagent-docker --profile livis stop
 ```
 
-`--profile` accepts `superagent` (default) and `livis`; `DSH_SUPERAGENT_PROFILE` sets the default. A named profile outside those two is refused, because only those two are managed by Docker; use `--legacy` for a host profile. Only the selected instance is started, stopped, restarted or reported.
+`--profile` accepts `superagent` (default) and `livis`; `DSH_SUPERAGENT_PROFILE` sets the default. A named profile outside those two is refused, because only those two are managed by Docker; use `scripts/dsh-superagent` for a host profile. Only the selected instance is started, stopped, restarted or reported.
 
 `start` builds the image on demand if the tag derived from the repository commit, the dsh-livis commit and the pinned DSH version is not in the local cache; `build` forces that build and prints the tag on stdout. A failed build exits 2 with the previous image tag and every volume untouched. `start` then waits for the management API: setup waiting and a broken non-runtime part return 3 and 2 without being treated as a start failure, and a timeout exits 1 while leaving the container running for inspection. When a running instance switches to a different image tag, the wrapper warns that the database migration is one-way and that rolling back needs the volume backup.
 
@@ -119,21 +511,21 @@ scripts/dsh-superagent --profile livis stop
 
 `--respect-stop` makes `start` and `restart` leave an intentionally stopped instance stopped and exit 0. Only `stop` writes the marker under `.artifacts/control/profiles/<instance>/manually-stopped`; `start` clears it, and `restart` never writes it. `logs` passes `--follow` and `--tail N` through to the selected service. A per-instance lock refuses two control operations at once.
 
-`--legacy` replaces the wrapper with the preserved pre-Docker implementation in `scripts/dsh-superagent-legacy`, forwarding the action, profile, timeouts, URL and `--respect-stop`. It covers `start`, `stop`, `restart` and `status` only; `logs` and `build` are refused because the host path has no such actions. It never touches the Compose projects, their volumes or the Docker state, which is what makes it the rollback path during the migration window. The appendix describes that host installation.
+The host-native entry point is `scripts/dsh-superagent`; it never touches these Compose projects, their volumes or the Docker state.
 
-#### Hourly check
+#### Docker hourly check
 
 Create the hourly check in the DeepSeek Harness profile you normally use, not in the instance's profile. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
 
 ```text
-Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, run `scripts/dsh-superagent --profile superagent logs --tail 200`, read the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+Check dsh-superagent: run `scripts/dsh-superagent-docker --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent-docker --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, run `scripts/dsh-superagent-docker --profile superagent logs --tail 200`, read the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
 Use `--profile livis` for the second instance. `--respect-stop` preserves an intentional stop: only `stop` writes the marker, `start` clears it, and the check never wakes an instance the operator stopped. The Compose `restart: unless-stopped` policy handles a crashed process; the check handles a container that runs but whose runtime is unhealthy.
 
 ### Run and stop the container
 
-The wrapper above is the supported path. The Compose commands here show what it drives and remain useful for inspection or recovery.
+The wrapper above is the only supported way to drive this frozen path. The Compose commands here show what it drives and remain useful for inspection or recovery.
 
 ```sh
 docker compose up --detach superagent
@@ -163,7 +555,7 @@ docker compose down
 
 The panel is published on `127.0.0.1` only. Do not add a `0.0.0.0` publish or a second port binding.
 
-### The livis instance
+### The livis container
 
 `livis` is the second instance and the same image. It carries a different baked profile, a different state directory and the Livis source plugin:
 
@@ -188,9 +580,9 @@ docker compose logs livis | grep -o 'http://127.0.0.1:3083/?token=[A-Za-z0-9_-]*
 Or through the operator wrapper, which is the supported path because it owns the readiness contract and drives the credential helper:
 
 ```sh
-scripts/dsh-superagent --profile livis start
-scripts/dsh-superagent --profile livis status
-scripts/dsh-superagent --profile livis stop
+scripts/dsh-superagent-docker --profile livis start
+scripts/dsh-superagent-docker --profile livis status
+scripts/dsh-superagent-docker --profile livis stop
 ```
 
 The lower-level helper `scripts/docker-instance` performs the same Compose, credential and state-import work for one instance:
@@ -208,14 +600,14 @@ The service sets `DSH_LIVIS_STATE_DIR=${OPERATOR_HOME}/.dsh/state/livis/livis-so
 
 Only one process may hold the livis client state: the refresh token rotates on every successful refresh, so a second instance signing in with the live token invalidates the first. Until cutover (#7), stop the host livis instance before starting the container with the real credential, and never run both against the same refresh token. The wrapper enforces this for the live directory: `prepare` and `start` refuse with exit code 2 while a process matching `--profile livis` is running and the state directory is `~/.dsh/state/livis`; setting `SUPERAGENT_ALLOW_LIVE_LIVIS=1` overrides the refusal deliberately. The opt-in test never copies the real token into the container: it replaces it with a rejected value, pauses the copied settings and disables every Source, so the plugin reports an authentication failure without polling or executing anything.
 
-### Credentialled start (ticket #3)
+### Credentialled container start
 
-Use `scripts/dsh-superagent` for the operator contract; it drives `scripts/docker-instance`, which owns the per-instance credentials:
+Use `scripts/dsh-superagent-docker` for the operator contract; it drives `scripts/docker-instance`, which owns the per-instance credentials:
 
 ```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
-scripts/dsh-superagent stop
+scripts/dsh-superagent-docker start
+scripts/dsh-superagent-docker status
+scripts/dsh-superagent-docker stop
 ```
 
 Use `--profile livis` for the second instance. `scripts/docker-instance` is also usable directly when the readiness polling is not wanted; the rest of this section describes the shared start path.
@@ -293,7 +685,7 @@ DeepSeek Harness binds `127.0.0.1:3082` inside the container and keeps its loopb
 
 Compose publishes `127.0.0.1:${SUPERAGENT_PUBLISH_PORT:-3082}:13082` for `superagent` and `127.0.0.1:${LIVIS_PUBLISH_PORT:-3083}:13083` for `livis`; the second relay and target port keep the two containers from sharing a listener. The relay rewrites `Host` to `127.0.0.1:3082`, and rewrites `Origin` to that same authority only when the incoming `Origin` matches the incoming `Host` (same-origin). DeepSeek Harness therefore sees its expected authority without the product code changing. The opt-in test asserts the only application listeners are the relay on `13082` and DeepSeek Harness on `127.0.0.1:3082`.
 
-To avoid a conflict with a host-profile instance, publish another loopback port:
+To avoid a conflict with a host-native instance, publish another loopback port:
 
 ```sh
 SUPERAGENT_PUBLISH_PORT=38082 docker compose up --detach superagent
@@ -301,7 +693,7 @@ SUPERAGENT_PUBLISH_PORT=38082 docker compose up --detach superagent
 
 Then open `http://127.0.0.1:38082/?token=<token>`. The logged URL still names the container-internal `3082`; replace its port. The opt-in test uses `38082` to prove that an alternate published port works.
 
-### Health and readiness
+### Container health and readiness
 
 Compose runs `/usr/local/bin/superagent-healthcheck` every 5 seconds, with a 5-second timeout, three retries and a 60-second start period. The check is the same for both services and reads `SUPERAGENT_RELAY_PORT` (13082 for `superagent`, 13083 for `livis`), so each container probes its own relay. It calls the management API with `x-orchestrator-request: 1` and reports healthy only when:
 
@@ -310,9 +702,9 @@ Compose runs `/usr/local/bin/superagent-healthcheck` every 5 seconds, with a 5-s
 
 A fresh, unconfigured volume is therefore unhealthy with `setup.problem.code = repositoryUnset`. That is the expected state, not a failed container. `docker compose ps` shows `starting` or `unhealthy` until the instance is configured and every part is ready. The `livis` instance additionally reports a `livis` health entry: `ready` after the relay connects, `paused` when the plugin is disabled or has no refresh token, and `error` with the failure code when authentication or connection fails. Like every Source entry, a failing `livis` relay makes the healthcheck unhealthy but does not stop DeepSeek Harness.
 
-The Compose file sets `restart: unless-stopped` for the container. That restarts a crashed process, but it cannot see setup waiting or a broken Source. The operator wrapper is the readiness layer: `scripts/dsh-superagent status` maps the management state to the four exit codes, `start` waits for readiness, and the [hourly check](#hourly-check) runs `scripts/dsh-superagent --respect-stop restart` so a failed runtime is recovered without waking an intentionally stopped instance.
+The Compose file sets `restart: unless-stopped` for the container. That restarts a crashed process, but it cannot see setup waiting or a broken Source. The operator wrapper is the readiness layer: `scripts/dsh-superagent-docker status` maps the management state to the four exit codes, `start` waits for readiness, and the [Docker hourly check](#docker-hourly-check) runs `scripts/dsh-superagent-docker --respect-stop restart` so a failed runtime is recovered without waking an intentionally stopped instance.
 
-### Credentials
+### Container credentials
 
 The image and the Compose file contain no token. That is deliberate: image layers, build arguments and container metadata are not a secret store. Nothing in this chapter asks you to put a token in `compose.yaml`. The livis refresh token is not a build input either: it lives only in `livis-source/client/state.json` on the imported `livis-state` volume, and the host copy stays the owner until cutover (#7).
 
@@ -320,13 +712,13 @@ The image and the Compose file contain no token. That is deliberate: image layer
 
 - the GitHub token is resolved through `gh auth token` or the macOS Keychain, validated with `gh api user`, written as a 0600 `hosts.yml`, mounted read-only, and removed by `stop`;
 - the DSH credential store is copied into the private home volume on first start, not baked into the image; it supplies the `livis` profile's `deepseek-account` model record;
-- the Slack bridge token is stored by the operator on the instance's home volume, as described under [Slack app (optional)](#slack-app-optional); the image and the Compose file carry none;
+- the Slack bridge token is stored by the operator on the instance's home volume, as described under [Slack app in the container](#slack-app-in-the-container); the image and the Compose file carry none;
 - the model key is passed only as the Compose process environment; it is never a file in the repository or image, and the `livis` start does not require it;
 - a missing or rejected GitHub token, missing DSH credential store for `livis`, or missing model key for `superagent` stops the start with exit code 2 and an actionable message.
 
 The image provides the same `gh-agent` path the imported `worker-gitconfig` and GitHub Source `cli` setting use. The entrypoint points it at the mounted container `hosts.yml`; git credential helpers therefore work without rewriting the imported state. A direct `docker compose up` without the runtime override still boots, but `gh` is unauthenticated and no model credential is present: use the wrapper for real work.
 
-### Slack app (optional)
+### Slack app in the container
 
 The image already carries the Slack bridge at `/opt/dsh-superagent/lib/slack-bridge.js`; `pnpm build` produces it, and its `@slack/socket-mode` and `@slack/web-api` dependencies are installed in the image. Socket Mode is an outbound WebSocket, so the Slack Source opens no inbound port and the container needs no extra publish.
 
@@ -348,124 +740,30 @@ The image already carries the Slack bridge at `/opt/dsh-superagent/lib/slack-bri
 4. Point the Slack Source's `cli` at `/opt/dsh-superagent/lib/slack-bridge.js`.
 
 The installation belongs to the account that installed the app. If that account leaves the workspace, Slack revokes the token and the Source reports it until the app is reinstalled and the tokens are stored again. Keep the app internal: a Socket Mode app cannot be distributed through the Slack Marketplace.
-
-## Configure an instance
-
-Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
-
-1. **Sources.** Set the GitHub repository (`owner/name`) and the Agent CLI. On the host-profile path this is the agent wrapper, for example `/home/me/.local/bin/gh-agent`; in the container the imported setting names `${OPERATOR_HOME}/.local/bin/gh-agent`, which the image provides. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages. For Slack, set the bridge path, each conversation's mentions-only or all-messages mode, the other-conversation choice, the direct-message switch, and, under Advanced, the history page size and backfill days.
-2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**; with Slack, a conversation, with the workspace id and listed bots.
-3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
-
-   ```sh
-   git -C /home/me/src/widgets fetch --no-tags "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET" &&
-   git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
-   ```
-
-   List personal CLIs, such as one signed in to your own account, as blocked commands. The Docker path does not bind a source clone into the container yet, so a prepare command cannot see a host checkout there; the Execution environment is complete only on the host-profile path until that bind mount lands.
-4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
-
-### Management API
-
-The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
-
-From the host, send requests to `http://127.0.0.1:<published port>/orchestrator/api/` with `x-orchestrator-request: 1`; the default published port is `3082`. On the Docker path the relay forwards the request to DeepSeek Harness. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
-
-API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
-
-Agents may rely on these routes and fields. The other routes in `src/app/api.ts` serve the panel and change with it.
-
-| Request | Answer |
-| --- | --- |
-| `GET state` | What every page reads: `setup`, with `problems`, a map from a settings card or Source kind such as `feishu` or `slack` to its setup problem, each with `place`, `code`, `values` and `detail`, `problem`, the first blocking problem (`null` when ready), `feishuProblem`, the Feishu Source's problem when present, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
-| `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
-| `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
-| `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
-| `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
-| `POST setup/check` | Runs setup again by restarting dsh-superagent: `restarting: true`. Refused when setup has nothing to fix |
-| `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
-| `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
-| `POST tickets/<id>/retry`, `POST tickets/<id>/stop` | Retries or stops a Ticket, as the panel does |
-
-Health entries are grouped by responsibility:
-
-| Entry | Reports |
-| --- | --- |
-| `runtime` | The application itself |
-| `models` | Sessions waiting on a model-budget retry |
-| `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
-| `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
-| `worker` | Executor Session event handling; appears after its first failure |
-| `github`, `feishu`, `slack`, `history:feishu`, `history:slack` | Source polling, events and history recovery |
-| `sync:<source id>` | Allowed-list synchronization |
-
-A refusal has a status and `error`, its English text:
-
-- 400: an invalid value (`issues`, each with its `path`), a failed account check (`setup`), a fixed refusal (`code` and `values`), or a body that is not JSON or is too large.
-- 404: something that does not exist.
-- 409: a stale revision.
-- 500: anything else.
-
-The blocks:
-
-- `source:github`, `source:feishu`, `source:slack`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`; Slack's has `cli`, `chats` as `[{"conversationId": "C…", "name": "…", "listen": "mentions"}]` (or `"all"`), `otherChats`, `directMessages`, `readPageSize` and `backfillDays`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}, "slack": {"teamId": "T…", "allowed": [{"id": "U…", "name": "…"}], "syncConversation": "C…", "bots": []}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
-- `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
-
-Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
-
-```sh
-api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
-```
-
-The CLI value is the Agent CLI path: `$HOME/.local/bin/gh-agent` on the host path, a path inside the container on the Docker path.
-
-## Setup checks
-
-Setup uses the DeepSeek Harness subprocess service, as worker shells do; in the container, both run inside the container. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
-
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. It probes each enabled Source's account fields: Feishu's bot identity and Slack's bridge path, workspace and bot. A Feishu or Slack setup failure disables only that Source.
-
-The process environment that setup writes:
-
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the Feishu bot's CLI; `slack-bridge` runs the Slack bridge, or fails with `slack-bridge is unavailable: this installation has no Slack app.`; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
-- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
-
-A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
-
-## Upgrade
+### Docker upgrade
 
 1. Wait until no Executor is in the middle of a turn, or pause processing with `POST executor/pause`.
 2. Back up the state volume. The database migration is one-way: an older image cannot open a database migrated by a newer one.
-3. Update the checkout and let the wrapper build the new image. With `SUPERAGENT_IMAGE` unset, the tag follows the new repository and dsh-livis commits; `scripts/dsh-superagent build` forces the build and prints the tag if you want to pin it. A failed build leaves the previous tag and every volume untouched.
+3. Update the checkout and let the wrapper build the new image. With `SUPERAGENT_IMAGE` unset, the tag follows the new repository and dsh-livis commits; `scripts/dsh-superagent-docker build` forces the build and prints the tag if you want to pin it. A failed build leaves the previous tag and every volume untouched.
 4. Restart the instance:
 
    ```sh
-   scripts/dsh-superagent restart                  # superagent
-   scripts/dsh-superagent --profile livis restart  # livis
+   scripts/dsh-superagent-docker restart                  # superagent
+   scripts/dsh-superagent-docker --profile livis restart  # livis
    ```
 
    The wrapper warns when a running instance moves to a different image tag, because the database migration is one-way. Build both services from the one tag; restart only the instance that should move.
 
-5. Inspect `scripts/dsh-superagent status`, the container logs and the panel. A healthy container is not the same as a healthy instance; wait until every health entry is `ready`. Upgrade the two services separately if only one instance should move; both use the same `SUPERAGENT_IMAGE` tag, so changing it affects the next recreated service.
+5. Inspect `scripts/dsh-superagent-docker status`, the container logs and the panel. A healthy container is not the same as a healthy instance; wait until every health entry is `ready`. Upgrade the two services separately if only one instance should move; both use the same `SUPERAGENT_IMAGE` tag, so changing it affects the next recreated service.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
-The previous image tag stays in the local Docker cache, but rollback also needs the pre-upgrade volume backup because of the one-way migration. Restore the volume, then start the previous tag again: set `SUPERAGENT_IMAGE` to the previous tag, recreate the container with Compose, or use `scripts/dsh-superagent --legacy` for the host path during the migration window.
+The previous image tag stays in the local Docker cache, but rollback also needs the pre-upgrade volume backup because of the one-way migration. Restore the volume, then start the previous tag again: set `SUPERAGENT_IMAGE` to the previous tag, recreate the container with Compose, or run `scripts/dsh-superagent` for the host-native instance.
 
-The opt-in Docker test covers restarting the same image with the same volumes, not an image upgrade or a migrated database. A cutover runbook is follow-up #7.
+The opt-in Docker test covers restarting the same image with the same volumes, not an image upgrade or a migrated database. The live cutover is complete; see `docs/adr/0004-host-native-deployment.md`.
+### Docker troubleshooting
 
-### Agent presets
-
-The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
-
-## Troubleshooting
-
-Setup problems appear on the overview with a link to the fix, in the panel's language; the log and the API show the English text below.
+These rows apply only to the frozen Docker path. The shared rows above also apply.
 
 | Symptom | Cause and fix |
 | --- | --- |
@@ -478,208 +776,9 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | The start exits 2 saying the GitHub token did not pass `gh api user` | The Keychain item is stale or belongs to another account; re-authenticate with `GH_CONFIG_DIR=~/.config/gh-agent gh auth login`, then retry |
 | The container is healthy for a while, then `unhealthy` | The healthcheck calls the management API through the relay; check `docker compose logs superagent` for a stopped runtime or a failed part |
 | `docker compose ps` shows `unhealthy` and setup reports `repositoryUnset` | A fresh volume is unconfigured by design; configure the Source and start through `scripts/docker-instance`, which supplies the credentials. A direct `docker compose up` has none |
-| `Bind for 127.0.0.1:3082 failed: port is already allocated` | A host-profile instance or another container owns the port; stop it or set `SUPERAGENT_PUBLISH_PORT` |
+| `Bind for 127.0.0.1:3082 failed: port is already allocated` | A host-native instance or another container owns the port; stop it or set `SUPERAGENT_PUBLISH_PORT` |
 | The panel returns 401 | The token is per boot; re-read it from the container log after every restart |
 | The URL from the log does not open when a publish variable is set | The log names the container-internal `3082` or `3083`; replace the port with the published one |
 | The relay answers 502 | DeepSeek Harness is not up yet or has exited; read `docker compose logs superagent` |
 | The panel says dsh-superagent is not answering while the container is up | It is restarting, or its configuration stopped startup; the container log names the cause |
 | State disappeared after `docker compose down` | `down --volumes` deletes the named volumes; without `--volumes` they survive |
-
-The remaining setup and runtime rows apply to both paths:
-
-| Symptom | Cause and fix |
-| --- | --- |
-| `The agent GitHub CLI is not set.` | Set the agent's CLI on the GitHub card |
-| `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
-| `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
-| `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
-| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
-| A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
-| `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
-| A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |
-| `… was not written by dsh-superagent` | Move the named file out of `<stateDir>/worker-bin` or `<stateDir>/worker-gitconfig`, or choose another `stateDir` |
-| `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in the appendix |
-| `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
-| `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
-| `The Slack bridge does not work.` | Point the Slack Source at the absolute path of `lib/slack-bridge.js` (or a command on `PATH`), and run `slack-bridge api auth.test` by hand |
-| `Slack rejected the bridge token: …` | Reinstall the app if needed, store fresh tokens with `slack-bridge auth`, then retry |
-| `The Slack bridge returned an answer dsh-superagent could not read.` | Run `slack-bridge api auth.test` by hand and fix what it prints |
-| Slack health says the bot token was revoked or the app was uninstalled | Reinstall the app to the workspace, store the new tokens with `slack-bridge auth`, and restart |
-| Slack health says the bot is not a member of a configured conversation | Invite the bot to that conversation, or remove the conversation from the Source card |
-| `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
-| `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
-| The log says the plugin is incompatible with the running dsh | Use a DeepSeek Harness version within the `engines.dsh` range |
-| The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
-| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment. On Slack, check that the conversation is configured, the bot was invited, and the app's Socket Mode connection is healthy |
-
-These three apply only to the host-profile control script:
-
-| Symptom | Cause and fix |
-| --- | --- |
-| `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part, as listed under Management API, with its detail; each part clears its own entry once it works again |
-| `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
-| `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |
-
-## Appendix: host-profile installation
-
-This is the pre-Docker installation kept for development and the rollback window. It runs the product as a DeepSeek Harness profile on the host in tmux, through `scripts/dsh-superagent --legacy`, which replaces itself with the preserved supervisor `scripts/dsh-superagent-legacy`; `SETUP.md` walks this path with an agent. It needs the host's Node.js, pnpm, DeepSeek Harness, git and tmux. Invoking `scripts/dsh-superagent` without `--legacy` drives the Docker instances and refuses any other profile.
-
-### What runs
-
-- **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot or a Slack app for chat requests.
-
-Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
-
-#### Permissions and isolation
-
-The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-router` for the main Session. They appear in the DeepSeek Harness preset list but are intended only for dsh-superagent. Do not select them for personal Sessions or disable their configuration rows. The application needs them to create and resume its Sessions.
-
-Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
-
-Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
-
-### Prerequisites
-
-- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh`, `lark-cli` or `slack-bridge` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
-- A model channel configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
-- For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
-- For Slack: the `slack-bridge` built from this bundle, and an internal Slack app with Socket Mode
-
-### Accounts
-
-#### Agent GitHub account
-
-1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
-2. Give it a GitHub CLI that uses only its own credentials:
-
-   ```sh
-   mkdir -p ~/.local/bin
-   cat > ~/.local/bin/gh-agent <<'EOF'
-   #!/bin/sh
-   GH_CONFIG_DIR="$HOME/.config/gh-agent" exec gh "$@"
-   EOF
-   chmod +x ~/.local/bin/gh-agent
-   gh-agent auth login
-   gh-agent api user --jq .login
-   ```
-
-   Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
-
-#### Feishu bot (optional)
-
-1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.
-2. Give the bot its own `lark-cli` configuration, restricted to the bot identity, and a wrapper:
-
-   ```sh
-   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config init --app-id <cli_…> --app-secret-stdin
-   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config strict-mode bot --global
-   cat > ~/.local/bin/lark-bot <<'EOF'
-   #!/bin/sh
-   export LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent"
-   exec lark-cli "$@"
-   EOF
-   chmod +x ~/.local/bin/lark-bot
-   ```
-
-   The first command reads the app secret from standard input. Use a separate configuration directory: `lark-cli` allows one profile per app id, and your personal configuration may already contain a user login for that app.
-
-   The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
-
-   Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
-
-#### Slack app for the host path
-
-Create the app and install it as described under [Slack app (optional)](#slack-app-optional). On this path build the bridge in the checkout and store the tokens with it:
-
-```sh
-pnpm build
-slack-bridge auth <<'EOF'
-{"bot_token":"xoxb-…","app_token":"xapp-…"}
-EOF
-slack-bridge api auth.test
-```
-
-`auth` writes `~/.slack-dsh-superagent/config.json` with mode `0600`. Point the Source's `cli` at the bridge's absolute path, usually `<checkout>/lib/slack-bridge.js`, or at the command `pnpm link --global` puts on `PATH`. The installation belongs to the account that installed the app; if that account leaves the workspace, Slack revokes the token and the Source reports it until the app is reinstalled and the tokens are stored again.
-
-### Install
-
-Run this block once, on a machine that has no `superagent` profile yet:
-
-```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
-git clone <this repository> dsh-superagent && cd dsh-superagent
-pnpm install && pnpm build
-dsh superagent --from-default-profile web --dump-config > /dev/null
-dsh plugin --profile superagent add "link:$PWD"
-```
-
-The pinned version above is public; other versions must satisfy `engines.dsh` in `package.json`.
-
-The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
-
-Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its `cordis.patch.yml`, including machine configuration. Do not use it for upgrades.
-
-### Machine configuration
-
-Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there; for Slack, the `dsh-superagent-slack` entry. The `webserver` entry sets the panel's port.
-
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
-| `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
-
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
-
-### Start and stop
-
-```sh
-scripts/dsh-superagent --legacy start
-scripts/dsh-superagent --legacy status
-```
-
-`start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. The `--legacy` flag on the commands above is what selects this host implementation; without it the wrapper drives the Docker instances.
-
-`stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
-
-`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
-
-`status`, `start` and `restart` exit with one of four codes:
-
-| Code | Meaning |
-| --- | --- |
-| 0 | The service runs normally |
-| 1 | It does not run, runs twice, does not answer, or its runtime reports an error; a restart may fix it |
-| 2 | It runs, but a part other than the runtime, such as a Source or a Policy sync (`sync:<source id>`), reports an error; a restart does not fix it |
-| 3 | It runs and waits for setup; a restart does not fix it |
-
-A Source that is still starting counts as normal operation. So does a Feishu bot that setup could not check.
-
-`status` returns failed parts and their details under `errors`, and setup requirements under `setup`. `start` and `restart` print those problems as lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
-
-Each profile stores logs and control files under `.artifacts/`:
-
-- Startup logs: `dsh-superagent-<profile>-<date>-<time>-<pid>.log`, where the pid belongs to the script. The newest 20 are kept.
-- Control files: `control/profiles/<profile>/`, containing the stop marker, lock and process id.
-
-Open the URL printed in the log, then choose **Superagent** in the sidebar.
-
-#### Hourly check
-
-For the host profile, use the [hourly check](#hourly-check) prompt from the Docker path with `--legacy` added to every `scripts/dsh-superagent` command, and replace the `logs --tail 200` failure step with the newest `.artifacts/dsh-superagent-superagent-*.log`. On this path `--respect-stop` still preserves an intentional stop: only `stop` writes the marker, `start` clears it, and `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
-
-### Host upgrade
-
-1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent --legacy restart` and inspect its status.
-
-A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
-
-### Try it
-
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat. For Slack, mention the bot in a configured conversation or send it a direct message.

@@ -15,16 +15,26 @@ It is also a way of working with an agent: **take as little human attention as p
 
 ## Setup
 
-Docker is the primary deployment path. With Docker running:
+dsh-superagent runs as a native macOS process under tmux. That is the primary deployment; the Docker path is frozen as an experimental opt-in and the rollback window ([ADR 0004](docs/adr/0004-host-native-deployment.md)). Install the pinned DeepSeek Harness CLI, then create a dedicated profile and install the bundle:
 
 ```sh
-scripts/dsh-superagent start    # builds the image on demand
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+git clone <this repository> dsh-superagent && cd dsh-superagent
+pnpm install && pnpm build
+dsh superagent --from-default-profile web --dump-config > /dev/null
+dsh plugin --profile superagent add "link:$PWD"
+```
+
+Start and inspect the instance:
+
+```sh
+scripts/dsh-superagent start
 scripts/dsh-superagent status
 ```
 
-`scripts/dsh-superagent` is the operator entry point. It builds the missing image from the repository commit, the dsh-livis commit and the DSH version, then starts only the selected instance, waits for readiness and prints the panel URL. Use `--profile livis` for the `livis` instance on port 3083. The lower-level Compose and `scripts/docker-instance` commands remain available for inspection and recovery. [006 Deployment](docs/006-deployment.md) covers prerequisites, volumes, health, credentials, the four status exit codes and `--legacy`. One image serves both instances. The live relay-identity cutover (#7) remains a follow-up.
+`scripts/dsh-superagent` is the operator entry point. It runs `dsh --profile superagent` in tmux session `dsh-superagent`, waits for readiness and reports JSON status; the panel URL and its per-boot token are in the `dsh web:` line of the newest `.artifacts/dsh-superagent-*.log`. Use `--profile livis --url http://127.0.0.1:3083` for the `livis` instance. The Docker/Compose wrapper remains available as `scripts/dsh-superagent-docker`; [006 Deployment](docs/006-deployment.md) covers prerequisites, credentials, the four status exit codes, the hourly check, upgrades and the frozen Docker appendix.
 
-To install the product into a DeepSeek Harness profile on the host instead (the legacy path, run with `--legacy`), or to have an agent walk through that installation with you, ask your coding agent:
+To have an agent walk through the installation with you, ask your coding agent:
 
 > Read SETUP.md in this repository and set up dsh-superagent with me.
 
@@ -40,11 +50,11 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [003 Execution](docs/003-execution.md)
 - [004 Prompts](docs/004-prompts.md)
 - [005 Panel](docs/005-panel.md)
-- [006 Deployment](docs/006-deployment.md): Docker-first build, run, configuration, upgrades and troubleshooting
+- [006 Deployment](docs/006-deployment.md): host-native install, run, credentials, upgrades and troubleshooting; frozen Docker appendix
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
-The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md), and the Docker decision is recorded in [docs/adr/0002-docker-deployment.md](docs/adr/0002-docker-deployment.md).
+The deployment vocabulary is defined in [GLOSSARY.md](GLOSSARY.md). [ADR 0004](docs/adr/0004-host-native-deployment.md) records the move to host-native deployment, and [ADR 0002](docs/adr/0002-docker-deployment.md) is superseded.
 
 ## Development
 
