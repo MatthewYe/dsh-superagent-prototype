@@ -1,0 +1,313 @@
+# Completion and dependency policy for a multi-ticket spec.
+#
+# Gate semantics (open-ontologies shacl):
+#   exit 0 = conforms, 1 = violation, 2 = indeterminate.
+#
+# The shapes are the policy.  They only see facts assembled by the collector
+# (lint exit code, unit-test exit code, git HEAD, tree cleanliness); the
+# collector is part of the trust boundary, not the ontology.
+
+@prefix ex:   <https://example.org/ontology-gate#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# ---------------------------------------------------------------------------
+# Vocabulary well-formedness
+# ---------------------------------------------------------------------------
+
+ex:TicketShape a sh:NodeShape ;
+  sh:targetClass ex:Ticket ;
+  sh:property [
+    sh:path ex:inSpec ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ticket must belong to exactly one spec" ;
+  ] ;
+  sh:property [
+    sh:path ex:title ;
+    sh:minCount 1 ;
+    sh:message "ticket must have a title" ;
+  ] .
+
+ex:StateShape a sh:NodeShape ;
+  sh:targetClass ex:Ticket ;
+  sh:or (
+    [ sh:class ex:Todo ]
+    [ sh:class ex:Doing ]
+    [ sh:class ex:Done ]
+  ) ;
+  sh:message "ticket must be exactly one of Todo, Doing, Done" ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "ticket has contradictory state classes" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ?s .
+  VALUES ?s { ex:Todo ex:Doing ex:Done }
+  $this a ?t .
+  VALUES ?t { ex:Todo ex:Doing ex:Done }
+  FILTER(STR(?s) < STR(?t))
+}
+""" ;
+  ] .
+
+ex:GateEvidenceShape a sh:NodeShape ;
+  sh:targetClass ex:GateEvidence ;
+  sh:property [
+    sh:path ex:outcome ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:in ( "pass" "fail" "error" ) ;
+    sh:message "gate evidence needs one outcome" ;
+  ] ;
+  sh:property [
+    sh:path ex:exitCode ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:integer ;
+    sh:message "gate evidence needs one integer exit code" ;
+  ] ;
+  sh:property [
+    sh:path ex:command ;
+    sh:minCount 1 ;
+    sh:message "gate evidence needs the command that was run" ;
+  ] ;
+  sh:property [
+    sh:path ex:outputSha256 ;
+    sh:minCount 1 ;
+    sh:pattern "^[0-9a-f]{64}$" ;
+    sh:message "gate evidence needs a sha256 of the captured output" ;
+  ] ;
+  sh:property [
+    sh:path ex:commit ;
+    sh:minCount 1 ;
+    sh:pattern "^[0-9a-f]{40}$" ;
+    sh:message "gate evidence must name the 40-hex commit it ran at" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a passing gate must have exit code 0" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this ex:outcome "pass" ;
+        ex:exitCode ?code .
+  FILTER(?code != 0)
+}
+""" ;
+  ] .
+
+ex:LintGateShape a sh:NodeShape ;
+  sh:targetClass ex:LintGate ;
+  sh:property [
+    sh:path ex:scope ;
+    sh:hasValue "all" ;
+    sh:message "lint evidence must cover the whole tree" ;
+  ] .
+
+ex:UnitTestsGateShape a sh:NodeShape ;
+  sh:targetClass ex:UnitTestsGate ;
+  sh:property [
+    sh:path ex:scope ;
+    sh:hasValue "all" ;
+    sh:message "unit-test evidence must cover the whole suite" ;
+  ] .
+
+ex:CommitEvidenceShape a sh:NodeShape ;
+  sh:targetClass ex:CommitEvidence ;
+  sh:property [
+    sh:path ex:commit ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:pattern "^[0-9a-f]{40}$" ;
+    sh:message "commit evidence needs one 40-hex sha" ;
+  ] ;
+  sh:property [
+    sh:path ex:treeClean ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:boolean ;
+    sh:hasValue true ;
+    sh:message "the tree must be clean at the recorded commit" ;
+  ] ;
+  sh:property [
+    sh:path ex:isAncestorOfHead ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:boolean ;
+    sh:hasValue true ;
+    sh:message "the recorded commit must be an ancestor of HEAD" ;
+  ] ;
+  sh:property [
+    sh:path ex:subject ;
+    sh:minCount 1 ;
+    sh:message "commit evidence needs the commit subject" ;
+  ] .
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+# A ticket that has started (Doing) or claims completion (Done) may not
+# point at a blocker that is not Done.
+ex:BlockerDoneShape a sh:NodeShape ;
+  sh:targetClass ex:Ticket ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "active/done ticket has a blocker that is not done" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ?state .
+  VALUES ?state { ex:Doing ex:Done }
+  $this ex:blockedBy ?b .
+  FILTER NOT EXISTS { ?b a ex:Done }
+}
+""" ;
+  ] .
+
+ex:NoCycleShape a sh:NodeShape ;
+  sh:targetClass ex:Ticket ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "ticket dependency cycle" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this ex:blockedBy+ $this
+}
+""" ;
+  ] .
+
+ex:BlockerSameSpecShape a sh:NodeShape ;
+  sh:targetClass ex:Ticket ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "blocker must be a ticket in the same spec" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this ex:inSpec ?spec ;
+        ex:blockedBy ?b .
+  OPTIONAL { ?b ex:inSpec ?bspec }
+  FILTER(!BOUND(?bspec) || ?bspec != ?spec)
+}
+""" ;
+  ] .
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+
+ex:DoneTicketShape a sh:NodeShape ;
+  sh:targetClass ex:Done ;
+  sh:property [
+    sh:path ex:hasCommitEvidence ;
+    sh:class ex:CommitEvidence ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "a done ticket needs exactly one commit evidence record" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "done ticket has no passing whole-tree lint at its commit" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:Done ;
+        ex:hasCommitEvidence ?ce .
+  ?ce ex:commit ?c .
+  FILTER NOT EXISTS {
+    $this ex:hasGateEvidence ?g .
+    ?g a ex:LintGate ;
+       ex:outcome "pass" ;
+       ex:exitCode 0 ;
+       ex:scope "all" ;
+       ex:commit ?c .
+  }
+}
+""" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "done ticket has no passing whole-suite unit tests at its commit" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:Done ;
+        ex:hasCommitEvidence ?ce .
+  ?ce ex:commit ?c .
+  FILTER NOT EXISTS {
+    $this ex:hasGateEvidence ?g .
+    ?g a ex:UnitTestsGate ;
+       ex:outcome "pass" ;
+       ex:exitCode 0 ;
+       ex:scope "all" ;
+       ex:commit ?c .
+  }
+}
+""" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "done ticket has a failing gate result" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:Done ;
+        ex:hasGateEvidence ?g .
+  ?g ex:outcome ?outcome ;
+     ex:exitCode ?code .
+  FILTER(?outcome != "pass" || ?code != 0)
+}
+""" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a gate ran at a different commit than the ticket's commit" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:Done ;
+        ex:hasCommitEvidence ?ce ;
+        ex:hasGateEvidence ?g .
+  ?ce ex:commit ?c .
+  ?g ex:commit ?gc .
+  FILTER(?gc != ?c)
+}
+""" ;
+  ] .
+
+# ---------------------------------------------------------------------------
+# Spec completion
+# ---------------------------------------------------------------------------
+
+ex:DoneSpecShape a sh:NodeShape ;
+  sh:targetClass ex:DoneSpec ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "spec is done while it has no tickets" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:DoneSpec .
+  FILTER NOT EXISTS { ?t a ex:Ticket ; ex:inSpec $this }
+}
+""" ;
+  ] ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "spec is marked done while a ticket is not done" ;
+    sh:select """
+PREFIX ex: <https://example.org/ontology-gate#>
+SELECT $this WHERE {
+  $this a ex:DoneSpec .
+  FILTER EXISTS {
+    ?t a ex:Ticket ;
+       ex:inSpec $this .
+    FILTER NOT EXISTS { ?t a ex:Done }
+  }
+}
+""" ;
+  ] .

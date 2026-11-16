@@ -1,0 +1,17 @@
+{
+  "id": "spec-mvp",
+  "title": "Ontology gate MVP spec",
+  "tickets": [
+    {"id": "T1", "title": "Add add()", "blocked_by": []},
+    {"id": "T2", "title": "Add mul()", "blocked_by": ["T1"]},
+    {"id": "T3", "title": "Add pow()", "blocked_by": ["T1"]},
+    {"id": "T4", "title": "Integration test", "blocked_by": ["T2", "T3"]}
+  ],
+  "gates": {
+    "lint": {"command": ["python3", "tools/lint.py"], "scope": "all"},
+    "unitTests": {
+      "command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "scope": "all"
+    }
+  }
+}

@@ -1,0 +1,60 @@
+# Ticket / spec vocabulary used by the gate.
+#
+# The TBox is deliberately small: it names the entities and properties the
+# gate talks about, and it records the disjointness of ticket states so an
+# OWL reasoner can detect contradictory state assertions.  The actual
+# completion policy lives in shapes.ttl, because requiring evidence to be
+# present is a closed-world question and OWL is open-world.
+
+@prefix ex:   <https://example.org/ontology-gate#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:Spec a owl:Class .
+ex:Ticket a owl:Class .
+
+ex:TicketState a owl:Class .
+ex:Todo a owl:Class ; rdfs:subClassOf ex:TicketState .
+ex:Doing a owl:Class ; rdfs:subClassOf ex:TicketState .
+ex:Done a owl:Class ; rdfs:subClassOf ex:TicketState .
+ex:DoneSpec a owl:Class ; rdfs:subClassOf ex:Spec .
+ex:ActiveSpec a owl:Class ; rdfs:subClassOf ex:Spec .
+
+[] a owl:AllDisjointClasses ;
+   owl:members ( ex:Todo ex:Doing ex:Done ) .
+
+ex:GateEvidence a owl:Class .
+ex:LintGate a owl:Class ; rdfs:subClassOf ex:GateEvidence .
+ex:UnitTestsGate a owl:Class ; rdfs:subClassOf ex:GateEvidence .
+ex:CommitEvidence a owl:Class .
+
+ex:inSpec a owl:ObjectProperty ;
+  rdfs:domain ex:Ticket ;
+  rdfs:range ex:Spec .
+
+ex:blockedBy a owl:ObjectProperty ;
+  rdfs:domain ex:Ticket ;
+  rdfs:range ex:Ticket .
+
+ex:hasGateEvidence a owl:ObjectProperty ;
+  rdfs:domain ex:Ticket ;
+  rdfs:range ex:GateEvidence .
+
+ex:hasCommitEvidence a owl:ObjectProperty ;
+  rdfs:domain ex:Ticket ;
+  rdfs:range ex:CommitEvidence .
+
+ex:title a owl:DatatypeProperty .
+ex:outcome a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:exitCode a owl:DatatypeProperty ; rdfs:range xsd:integer .
+ex:command a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:outputSha256 a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:commit a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:treeClean a owl:DatatypeProperty ; rdfs:range xsd:boolean .
+ex:isAncestorOfHead a owl:DatatypeProperty ; rdfs:range xsd:boolean .
+ex:scope a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:subject a owl:DatatypeProperty ; rdfs:range xsd:string .
+ex:committedAt a owl:DatatypeProperty ; rdfs:range xsd:dateTime .
+ex:checkedAt a owl:DatatypeProperty ; rdfs:range xsd:dateTime .
+ex:durationMs a owl:DatatypeProperty ; rdfs:range xsd:integer .
